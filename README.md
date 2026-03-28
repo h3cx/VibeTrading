@@ -38,6 +38,19 @@ Recommended baseline first run:
 
 See: `docs/longer-term-baseline.md`
 
+## Storage conventions
+
+All generated outputs now use deterministic IDs in folder paths:
+
+- `data/raw/<exchange>/<symbol>/<datatype>/...`
+- `data/features/<symbol>/<dataset_id>/features.csv`
+- `data/labels/<symbol>/<dataset_id>/labels.csv`
+- `models/baseline/<symbol>/<run_id>/...`
+- `models/rl/<symbol>/<run_id>/...`
+- `artifacts/backtests/<symbol>/<run_id>/...`
+
+Tags are stored under each scope in `_tags/` (for example `data/features/BTCUSDT/_tags/latest.txt`).
+
 ## Project layout
 
 - `src/trader/cli.py` — interactive commands.
