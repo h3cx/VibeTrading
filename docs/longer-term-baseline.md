@@ -45,6 +45,10 @@ Then run these options in order:
    - Epochs: `20`.
    - Batch size: `512`.
    - LR: `0.001`.
+   - Lookback window: `12`.
+   - Hidden size: `512`.
+   - MLP depth: `4`.
+   - Dropout: `0.15`.
 7. **Backtest baseline**
    - Start with defaults, then tune thresholds.
 
@@ -93,3 +97,15 @@ For an initial baseline, prioritize:
 - Backtest behavior that is directionally reasonable.
 
 You can optimize performance later once the dataset and labeling assumptions are stable.
+
+## 7) Baseline architecture (current)
+
+The baseline model is now a pure feedforward time-window MLP:
+
+- Input shape: `[batch, lookback_window, features]`
+- Flatten: `lookback_window * features`
+- Backbone: stacked MLP blocks (`Linear -> LayerNorm -> GELU -> Dropout -> Linear -> LayerNorm -> GELU`)
+- Residual connection applied when block input/output dimensions match
+- Head: `Linear(512 -> 128) -> GELU -> Linear(128 -> 3)`
+
+This keeps training simple and fast while adding enough capacity for richer baseline checks.

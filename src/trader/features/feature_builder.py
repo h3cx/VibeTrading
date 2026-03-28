@@ -437,12 +437,6 @@ def build_feature_frames(
     total_seconds = end_second - start_second + 1
     total_bars = math.ceil(total_seconds / timeframe_s)
 
-    agg_source_paths = _select_overlapping_files(
-        Path("data/raw/binance") / symbol / "aggtrades",
-        start_ms,
-        end_ms,
-    )
-
     kline_context: dict[int, tuple[float, float, float, float]] = {}
     first_kline: tuple[float, float, float, float] | None = None
     kline_source_paths: list[Path] = []

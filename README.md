@@ -14,6 +14,8 @@ The CLI pipeline lets you:
 4. Train a baseline PyTorch MLP classifier (`NO_TRADE`, `LONG_SETUP`, `SHORT_SETUP`).
 5. Backtest model probabilities with threshold-based rules.
 
+Current baseline architecture is a flattened lookback-window MLP with LayerNorm/GELU/Dropout residual blocks.
+
 ## Why the new default is longer-term
 
 If you were previously using `1s` features for scalping, row count explodes quickly.  
@@ -37,19 +39,6 @@ Recommended baseline first run:
 ## Detailed usage and tuning guide
 
 See: `docs/longer-term-baseline.md`
-
-## Storage conventions
-
-All generated outputs now use deterministic IDs in folder paths:
-
-- `data/raw/<exchange>/<symbol>/<datatype>/...`
-- `data/features/<symbol>/<dataset_id>/features.csv`
-- `data/labels/<symbol>/<dataset_id>/labels.csv`
-- `models/baseline/<symbol>/<run_id>/...`
-- `models/rl/<symbol>/<run_id>/...`
-- `artifacts/backtests/<symbol>/<run_id>/...`
-
-Tags are stored under each scope in `_tags/` (for example `data/features/BTCUSDT/_tags/latest.txt`).
 
 ## Project layout
 
