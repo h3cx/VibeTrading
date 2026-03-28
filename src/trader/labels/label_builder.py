@@ -231,9 +231,16 @@ def _compute_label_for_current(
     long_event = "NONE"
     short_event = "NONE"
 
+    def _elapsed_seconds(row: FeatureRow, fallback_steps: int) -> float:
+        delta = float(row.timestamp_s - current.timestamp_s)
+        if delta > 0:
+            return delta
+        return float(fallback_steps)
+
     for offset, row in enumerate(future_rows, start=1):
         high_j = row.high
         low_j = row.low
+        elapsed_s = _elapsed_seconds(row=row, fallback_steps=offset)
 
         if not found_long:
             hit_long_tp = high_j >= long_tp_px
@@ -244,19 +251,19 @@ def _compute_label_for_current(
                 long_reason = "AMBIGUOUS"
                 long_event = "AMBIGUOUS"
                 long_net = None
-                long_tte = float(offset)
+                long_tte = elapsed_s
             elif hit_long_tp:
                 found_long = True
                 long_reason = "TP"
                 long_event = "TP"
                 long_net = (tp - total_cost) * 100.0
-                long_tte = float(offset)
+                long_tte = elapsed_s
             elif hit_long_sl:
                 found_long = True
                 long_reason = "SL"
                 long_event = "SL"
                 long_net = (-sl - total_cost) * 100.0
-                long_tte = float(offset)
+                long_tte = elapsed_s
 
         if not found_short:
             hit_short_tp = low_j <= short_tp_px
@@ -267,19 +274,19 @@ def _compute_label_for_current(
                 short_reason = "AMBIGUOUS"
                 short_event = "AMBIGUOUS"
                 short_net = None
-                short_tte = float(offset)
+                short_tte = elapsed_s
             elif hit_short_tp:
                 found_short = True
                 short_reason = "TP"
                 short_event = "TP"
                 short_net = (tp - total_cost) * 100.0
-                short_tte = float(offset)
+                short_tte = elapsed_s
             elif hit_short_sl:
                 found_short = True
                 short_reason = "SL"
                 short_event = "SL"
                 short_net = (-sl - total_cost) * 100.0
-                short_tte = float(offset)
+                short_tte = elapsed_s
 
         if found_long and found_short:
             break
@@ -288,13 +295,13 @@ def _compute_label_for_current(
         long_event = "HORIZON"
         long_reason = "HORIZON"
         long_net = long_horizon_return_pct
-        long_tte = float(len(future_rows))
+        long_tte = _elapsed_seconds(row=future_rows[-1], fallback_steps=len(future_rows))
 
     if not found_short:
         short_event = "HORIZON"
         short_reason = "HORIZON"
         short_net = short_horizon_return_pct
-        short_tte = float(len(future_rows))
+        short_tte = _elapsed_seconds(row=future_rows[-1], fallback_steps=len(future_rows))
 
     long_good = (long_net is not None) and (float(long_net) > 0.0) and (long_reason == "TP")
     short_good = (short_net is not None) and (float(short_net) > 0.0) and (short_reason == "TP")
@@ -519,9 +526,9 @@ def build_labels(
             "timeframe_s": timeframe_s,
             "date_range": {
                 "start_ms": first_ts_ms,
-                "end_ms": last_ts_ms + 1000,
+                "end_ms": last_ts_ms + timeframe_s * 1000,
                 "start_at": timestamp_ms_to_iso(first_ts_ms),
-                "end_at": timestamp_ms_to_iso(last_ts_ms + 1000),
+                "end_at": timestamp_ms_to_iso(last_ts_ms + timeframe_s * 1000),
             },
             "source_raw_files": build_source_entries([feature_path]),
             "labeling_params": {

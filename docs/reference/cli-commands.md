@@ -153,6 +153,8 @@ Trains the lookback-window residual MLP baseline classifier.
 | `Dropout` | float | `0.15` | Dropout in each block. |
 | `Train fraction` | float | `0.70` | Chronological split fraction for train. |
 | `Validation fraction` | float | `0.15` | Chronological split fraction for validation. |
+| `Random seed` | int | `42` | Global seed for Python/NumPy/PyTorch initialization. |
+| `Run tag` | string | `latest` | Optional tag written under `models/baseline/<symbol>/_tags/`. |
 | `Use class weights?` | enum (`y`/`n`) | `y` | Whether to weight CE loss by inverse class frequency. |
 
 ### Hard validations in code
@@ -196,6 +198,7 @@ Runs inference + thresholded one-trade-at-a-time simulation.
 | `Long probability threshold` | float | `0.80` | Minimum long class probability to open LONG. |
 | `Short probability threshold` | float | `0.80` | Minimum short class probability to open SHORT. |
 | `Trade-vs-no-trade margin` | float | `0.05` | Required margin over `p_no_trade` to execute trade. |
+| `Run tag` | string | `latest` | Optional tag written under `artifacts/backtests/<symbol>/_tags/`. |
 
 ### Decision logic summary
 

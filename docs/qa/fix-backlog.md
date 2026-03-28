@@ -1,91 +1,88 @@
-# Fix Backlog (from Codebase Audit)
+# Fix Backlog (QA Pass 2)
 
-## QA-001 — Fix undefined aggtrade source variable in feature builder
+## QA-001 — Resolve aggtrade source-path wiring
 
-- **ID:** QA-001
 - **Severity:** critical
-- **Owner:** `@owner-tbd`
-- **Scope:** `src/trader/features/feature_builder.py::build_feature_frames`
+- **Affected paths:** `src/trader/features/feature_builder.py`
+- **Acceptance criteria:**
+  - `build_feature_frames(...)` resolves `agg_source_paths` before first use.
+  - Source files are propagated to manifest metadata.
+  - Feature build no longer fails with `NameError`.
+- **Verification command/check:**
+  - `uv run ruff check src/trader/features/feature_builder.py`
+  - `uv run python -m unittest tests.test_qa_regressions.QARegressionTests.test_time_to_exit_is_seconds`
 
-**Acceptance criteria**
-- `build_feature_frames(...)` defines and populates aggtrade source paths before calling `_iter_aggtrade_second_aggregates(...)`.
-- Runtime smoke invocation no longer raises `NameError`.
-- Feature manifest includes resolved aggtrade source files.
+## QA-002 — Fix label `time_to_exit_s` units
 
-**Test plan**
-- Unit/smoke: invoke `build_feature_frames(symbol='BTCUSDT', start_ms=..., end_ms=..., include_kline_context=False)` and verify no pre-I/O variable error.
-- Integration: run end-to-end fetch→features on a small date range and verify `features.csv` + registry manifest are created.
-
----
-
-## QA-002 — Correct `time_to_exit_s` to real seconds
-
-- **ID:** QA-002
 - **Severity:** high
-- **Owner:** `@owner-tbd`
-- **Scope:** `src/trader/labels/label_builder.py::_compute_label_for_current`
+- **Affected paths:** `src/trader/labels/label_builder.py`
+- **Acceptance criteria:**
+  - `time_to_exit_s` stores elapsed seconds (timestamp delta), not bar count.
+  - One 5-minute future bar yields `300` seconds when the trade exits on that bar.
+- **Verification command/check:**
+  - `uv run python -m unittest tests.test_qa_regressions.QARegressionTests.test_time_to_exit_is_seconds`
 
-**Acceptance criteria**
-- All `time_to_exit_s` assignments represent elapsed **seconds**, not bars.
-- For a one-bar TP on timeframe `T`, output equals `T` seconds.
-- Backtest hold logic consumes correctly scaled durations.
+## QA-003 — Correct label manifest end-range semantics
 
-**Test plan**
-- Unit: synthetic one-bar TP/SL scenarios across `timeframe_s` values (1, 5, 300) and assert `time_to_exit_s`.
-- Regression: compare backtest trade counts before/after on same checkpoint+labels and confirm expected cadence changes.
-
----
-
-## QA-003 — Fix label manifest end timestamp semantics
-
-- **ID:** QA-003
 - **Severity:** medium
-- **Owner:** `@owner-tbd`
-- **Scope:** `src/trader/labels/label_builder.py::build_labels` (manifest generation)
-
-**Acceptance criteria**
-- `date_range.end_ms` equals `last_ts_ms + timeframe_s*1000`.
-- `date_range.end_at` reflects corrected `end_ms`.
-- Behavior validated for non-1s bars (e.g., 5m timeframe).
-
-**Test plan**
-- Integration: build labels from synthetic `timeframe_s=300` features and assert manifest end is `+300000ms`.
-- Add a test case covering 1s and 5m equivalence logic.
-
----
+- **Affected paths:** `src/trader/labels/label_builder.py`
+- **Acceptance criteria:**
+  - Manifest `date_range.end_ms` = `last_ts_ms + timeframe_s*1000`.
+  - Manifest `date_range.end_at` is derived from corrected `end_ms`.
+- **Verification command/check:**
+  - Static review of `build_labels(...)` manifest assignment.
+  - End-to-end label build smoke in future QA runbook.
 
 ## QA-004 — Enforce train/backtest preprocessing parity
 
-- **ID:** QA-004
 - **Severity:** high
-- **Owner:** `@owner-tbd`
-- **Scope:**
-  - `src/trader/baseline/train_baseline.py::_load_labels`
-  - `src/trader/baseline/backtest_baseline.py::_load_labels`
-
-**Acceptance criteria**
-- Duplicate timestamp handling is consistent between train and backtest (either both drop with same rule or both keep).
-- Same input labels CSV yields matching cleaned row count and timestamp set in both paths.
-- Parity behavior is documented in module docstrings/comments.
-
-**Test plan**
-- Unit: synthetic labels with duplicate timestamps and mixed ordering; assert identical cleaned outputs.
-- Regression: training and backtest run metadata should report consistent source row accounting when using same labels input.
-
----
+- **Affected paths:**
+  - `src/trader/baseline/train_baseline.py`
+  - `src/trader/baseline/backtest_baseline.py`
+- **Acceptance criteria:**
+  - Both paths drop duplicate `timestamp_ms` rows with `keep='last'` after sorting.
+  - Same input CSV yields same cleaned timestamp series.
+- **Verification command/check:**
+  - `uv run python -m unittest tests.test_qa_regressions.QARegressionTests.test_train_backtest_label_preprocess_parity`
 
 ## QA-005 — Expose reproducibility knobs in CLI
 
-- **ID:** QA-005
 - **Severity:** low
-- **Owner:** `@owner-tbd`
-- **Scope:** `src/trader/cli.py` baseline commands
+- **Affected paths:** `src/trader/cli.py`
+- **Acceptance criteria:**
+  - Training exposes prompt for `seed` and `run_tag`.
+  - Backtest exposes prompt for `run_tag`.
+  - Values are passed through to called functions.
+- **Verification command/check:**
+  - Static review of `train_baseline_cmd(...)` and `backtest_baseline_cmd(...)`.
 
-**Acceptance criteria**
-- CLI prompts/flags include `seed` and `run_tag` for training and backtesting.
-- Defaults remain backward compatible.
-- Generated artifacts/runs visibly reflect chosen values.
+## QA-006 — Checkpoint compatibility alias handling
 
-**Test plan**
-- CLI smoke: run train/backtest with non-default seed/tag and verify output run metadata.
-- Manual: validate interactive menu still works with defaults and with explicit values.
+- **Severity:** high
+- **Affected paths:** `src/trader/baseline/backtest_baseline.py`
+- **Acceptance criteria:**
+  - Backtest loader accepts legacy key aliases (`state_dict`, `feature_cols`, `standardizer_mu`, `standardizer_sigma`).
+  - Missing canonical fields are populated from aliases before strict validation.
+- **Verification command/check:**
+  - `uv run python -m unittest tests.test_qa_regressions.QARegressionTests.test_checkpoint_alias_compatibility`
+
+## QA-007 — Data-path robustness for training/backtest inputs
+
+- **Severity:** medium
+- **Affected paths:**
+  - `src/trader/baseline/train_baseline.py`
+  - `src/trader/baseline/backtest_baseline.py`
+- **Acceptance criteria:**
+  - File existence is checked up-front for explicit input files.
+  - Error messages identify the missing path clearly.
+- **Verification command/check:**
+  - `uv run python -m unittest tests.test_qa_regressions`
+
+## QA-008 — Feature leakage audit follow-up (deferred)
+
+- **Severity:** medium
+- **Affected paths:** `src/trader/baseline/train_baseline.py`, `src/trader/baseline/backtest_baseline.py`
+- **Acceptance criteria:**
+  - Add automated schema guard ensuring no post-event fields can enter feature columns.
+- **Verification command/check:**
+  - Deferred to QA pass 3 due to required schema policy RFC.

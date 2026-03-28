@@ -49,7 +49,20 @@ def _find_latest_label_file(symbol: str) -> Path:
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint file does not exist: {path}")
+
     checkpoint = torch.load(path, map_location="cpu")
+    # Legacy compatibility aliases for older baseline artifacts.
+    if "state_dict" in checkpoint and "model_state_dict" not in checkpoint:
+        checkpoint["model_state_dict"] = checkpoint["state_dict"]
+    if "feature_cols" in checkpoint and "feature_columns" not in checkpoint:
+        checkpoint["feature_columns"] = checkpoint["feature_cols"]
+    if "standardizer_mu" in checkpoint and "standardizer_mean" not in checkpoint:
+        checkpoint["standardizer_mean"] = checkpoint["standardizer_mu"]
+    if "standardizer_sigma" in checkpoint and "standardizer_std" not in checkpoint:
+        checkpoint["standardizer_std"] = checkpoint["standardizer_sigma"]
+
     required = {
         "model_state_dict",
         "input_dim",
@@ -65,6 +78,8 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
 
 
 def _load_labels(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Label file does not exist: {path}")
     console.print(f"[cyan]Loading labels from[/cyan] {path}")
     df = cast(pd.DataFrame, pd.read_csv(path))
 

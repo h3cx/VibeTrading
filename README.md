@@ -64,11 +64,14 @@ Run these menu options in order for a first reliable baseline:
    - Hidden dim: `512`
    - Depth: `4`
    - Dropout: `0.15`
+   - Seed: `42`
+   - Run tag: `latest`
 7. **Backtest baseline**
    - Eval split: `test`
    - Long threshold: `0.80`
    - Short threshold: `0.80`
    - Margin: `0.05`
+   - Run tag: `latest`
 
 ## Compatibility notes for old checkpoints
 
@@ -85,6 +88,7 @@ Compatibility behavior:
 
 - If `lookback_window` is missing in an older checkpoint, backtest falls back to `1`.
 - If `hidden_dim`, `depth`, or `dropout` are missing, backtest falls back to `512`, `4`, and `0.15`.
+- Legacy checkpoint keys are auto-mapped when present (`state_dict`→`model_state_dict`, `feature_cols`→`feature_columns`, `standardizer_mu`→`standardizer_mean`, `standardizer_sigma`→`standardizer_std`).
 - If the label CSV used for backtest does not contain all `feature_columns` from the checkpoint, backtest fails with a missing-feature error.
 
 Practical guidance:
@@ -118,3 +122,11 @@ Practical guidance:
 A current QA sweep identified active correctness and consistency gaps in the pipeline (including feature-build runtime failure and train/backtest parity issues).
 
 See: `docs/qa/codebase-audit-report.md`
+
+
+## Migration notes (QA pass 2)
+
+- Label `time_to_exit_s` now records elapsed **seconds** from entry bar timestamp to exit condition timestamp (previously it could behave like a bar index).
+- Label registry `date_range.end_ms` now scales with `timeframe_s` instead of assuming 1-second bars.
+- Training label preprocessing now drops duplicate `timestamp_ms` rows with the same policy as backtest (`keep='last'`) to preserve parity.
+- CLI baseline commands now expose reproducibility controls (`seed`, `run_tag`).
