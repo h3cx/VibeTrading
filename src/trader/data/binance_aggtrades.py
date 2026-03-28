@@ -21,6 +21,84 @@ from trader.data.storage import ARTIFACTS_ROOT, raw_data_dir
 BINANCE_ARCHIVE_BASE_URL = "https://data.binance.vision"
 
 
+ARCHIVE_COLUMNS = [
+    "agg_trade_id",
+    "price",
+    "quantity",
+    "first_trade_id",
+    "last_trade_id",
+    "timestamp",
+    "buyer_is_maker",
+]
+
+_NUMERIC_COLUMNS = [
+    "agg_trade_id",
+    "price",
+    "quantity",
+    "first_trade_id",
+    "last_trade_id",
+    "timestamp",
+]
+
+_INT_COLUMNS = ["agg_trade_id", "first_trade_id", "last_trade_id", "timestamp"]
+_FLOAT_COLUMNS = ["price", "quantity"]
+
+_TRUE_VALUES = {"true", "1", "t", "y", "yes"}
+_FALSE_VALUES = {"false", "0", "f", "n", "no"}
+
+
+def _day_label(day_start_ms: int) -> str:
+    return datetime.fromtimestamp(day_start_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
+
+
+def _stage_error(*, stage: str, symbol: str, day_start_ms: int, details: str) -> RuntimeError:
+    day = _day_label(day_start_ms)
+    return RuntimeError(f"{stage} stage failed for {symbol} on {day}: {details}")
+
+
+def _format_exc_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if message:
+        return message
+    return exc.__class__.__name__
+
+
+def _normalize_archive_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+    if chunk.empty:
+        return pd.DataFrame(columns=ARCHIVE_COLUMNS)
+
+    working = chunk.iloc[:, : len(ARCHIVE_COLUMNS)].copy()
+    working.columns = ARCHIVE_COLUMNS
+    for col in ARCHIVE_COLUMNS:
+        working[col] = working[col].astype("string").str.strip()
+
+    working = working[working["agg_trade_id"].str.fullmatch(r"\d+", na=False)]
+    if working.empty:
+        return pd.DataFrame(columns=ARCHIVE_COLUMNS)
+
+    for col in _NUMERIC_COLUMNS:
+        working[col] = pd.to_numeric(working[col], errors="coerce")
+    working = working.dropna(subset=_NUMERIC_COLUMNS)
+    if working.empty:
+        return pd.DataFrame(columns=ARCHIVE_COLUMNS)
+
+    maker = working["buyer_is_maker"].str.lower()
+    bool_map = {value: True for value in _TRUE_VALUES}
+    bool_map.update({value: False for value in _FALSE_VALUES})
+    working["buyer_is_maker"] = maker.map(bool_map)
+    working = working.dropna(subset=["buyer_is_maker"])
+    if working.empty:
+        return pd.DataFrame(columns=ARCHIVE_COLUMNS)
+
+    for col in _INT_COLUMNS:
+        working[col] = working[col].astype("int64")
+    for col in _FLOAT_COLUMNS:
+        working[col] = working[col].astype("float64")
+    working["buyer_is_maker"] = working["buyer_is_maker"].astype("bool")
+
+    return working[ARCHIVE_COLUMNS]
+
+
 @dataclass(frozen=True)
 class _DayJob:
     day_start_ms: int
@@ -161,29 +239,17 @@ def parse_decompress_day(*, archive_bytes: bytes, chunksize_rows: int) -> Iterat
             frame_iter = pd.read_csv(
                 zipped,
                 header=None,
-                names=[
-                    "agg_trade_id",
-                    "price",
-                    "quantity",
-                    "first_trade_id",
-                    "last_trade_id",
-                    "timestamp",
-                    "buyer_is_maker",
-                ],
-                dtype={
-                    "agg_trade_id": "int64",
-                    "price": "float64",
-                    "quantity": "float64",
-                    "first_trade_id": "int64",
-                    "last_trade_id": "int64",
-                    "timestamp": "int64",
-                    "buyer_is_maker": "bool",
-                },
+                names=ARCHIVE_COLUMNS,
+                usecols=range(len(ARCHIVE_COLUMNS)),
+                dtype={col: "string" for col in ARCHIVE_COLUMNS},
                 low_memory=False,
+                on_bad_lines="skip",
                 chunksize=chunksize_rows,
             )
             for chunk in frame_iter:
-                yield chunk
+                sanitized = _normalize_archive_chunk(chunk)
+                if not sanitized.empty:
+                    yield sanitized
 
 
 def persist_day(
@@ -241,6 +307,7 @@ def fetch_aggtrades_range(
     max_retries: int = 3,
     retry_backoff_s: float = 1.0,
     sequential: bool = False,
+    skip_bad_days: bool = False,
 ) -> FetchAggtradesResult:
     """Fetch aggtrades archives across a UTC day range and materialize one ordered CSV artifact.
 
@@ -263,6 +330,7 @@ def fetch_aggtrades_range(
         max_retries: Retry attempts after the first request failure.
         retry_backoff_s: Exponential backoff base in seconds.
         sequential: If true, run in sequential mode (debug/regression fallback).
+        skip_bad_days: Continue if a single day fails in parse/persist stage.
     """
     if source not in {"auto", "archive", "rest"}:
         raise ValueError("source must be one of: auto, archive, rest")
@@ -288,6 +356,7 @@ def fetch_aggtrades_range(
     cancel_event = Event()
     first_error_lock = Lock()
     first_error: list[Exception] = []
+    skipped_days: dict[int, str] = {}
     day_metrics: dict[int, _DayMetrics] = {day_start_ms: _DayMetrics() for day_start_ms in jobs}
     day_metrics_lock = Lock()
     download_stage_stats = _StageStats()
@@ -299,6 +368,13 @@ def fetch_aggtrades_range(
             if not first_error:
                 first_error.append(exc)
         cancel_event.set()
+
+    def maybe_skip_day(*, day_start_ms: int, stage: str, exc: Exception) -> bool:
+        if skip_bad_days and stage in {"parse", "persist"}:
+            with first_error_lock:
+                skipped_days[day_start_ms] = f"{stage}: {_format_exc_message(exc)}"
+            return True
+        return False
 
     def producer() -> None:
         try:
@@ -431,14 +507,22 @@ def fetch_aggtrades_range(
     def run_sequential() -> None:
         with httpx.Client() as client:
             for day_start_ms in jobs:
-                payload = download_day_archive(
-                    client=client,
-                    symbol=symbol,
-                    day_start_ms=day_start_ms,
-                    request_timeout_s=request_timeout_s,
-                    max_retries=max_retries,
-                    retry_backoff_s=retry_backoff_s,
-                )
+                try:
+                    payload = download_day_archive(
+                        client=client,
+                        symbol=symbol,
+                        day_start_ms=day_start_ms,
+                        request_timeout_s=request_timeout_s,
+                        max_retries=max_retries,
+                        retry_backoff_s=retry_backoff_s,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise _stage_error(
+                        stage="download",
+                        symbol=symbol,
+                        day_start_ms=day_start_ms,
+                        details=_format_exc_message(exc),
+                    ) from exc
                 with day_metrics_lock:
                     metric = day_metrics[day_start_ms]
                     metric.download_seconds += payload.elapsed_s
@@ -450,24 +534,37 @@ def fetch_aggtrades_range(
                     temp_path.unlink()
                 wrote_any = False
                 parse_started = time.perf_counter()
-                for chunk in parse_decompress_day(
-                    archive_bytes=payload.archive_bytes,
-                    chunksize_rows=parse_chunksize_rows,
-                ):
-                    persist_day(frame=chunk, output_path=temp_path, write_header=not wrote_any)
-                    rows = int(len(chunk.index))
-                    with day_metrics_lock:
-                        metric = day_metrics[day_start_ms]
-                        metric.persisted_rows += rows
-                    wrote_any = True
+                try:
+                    for chunk in parse_decompress_day(
+                        archive_bytes=payload.archive_bytes,
+                        chunksize_rows=parse_chunksize_rows,
+                    ):
+                        persist_day(frame=chunk, output_path=temp_path, write_header=not wrote_any)
+                        rows = int(len(chunk.index))
+                        with day_metrics_lock:
+                            metric = day_metrics[day_start_ms]
+                            metric.persisted_rows += rows
+                        wrote_any = True
+                    if not wrote_any:
+                        raise RuntimeError(f"No rows parsed for day {_day_label(day_start_ms)}")
+                except Exception as exc:  # noqa: BLE001
+                    wrapped = _stage_error(
+                        stage="parse",
+                        symbol=symbol,
+                        day_start_ms=day_start_ms,
+                        details=_format_exc_message(exc),
+                    )
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    if maybe_skip_day(day_start_ms=day_start_ms, stage="parse", exc=wrapped):
+                        continue
+                    raise wrapped from exc
                 parse_elapsed = time.perf_counter() - parse_started
                 with day_metrics_lock:
                     metric = day_metrics[day_start_ms]
                     metric.parse_seconds += parse_elapsed
                     metric.write_seconds += parse_elapsed
                     metric.parsed_rows = metric.persisted_rows
-                if not wrote_any:
-                    raise RuntimeError(f"No rows parsed for day {day_start_ms}")
                 temp_path.replace(output_path)
                 results.append(_DayResult(day_start_ms=day_start_ms, output_path=output_path))
 
@@ -512,7 +609,13 @@ def fetch_aggtrades_range(
                             _DownloadedDay(day_start_ms=job.day_start_ms, archive_bytes=payload.archive_bytes)
                         )
                     except Exception as exc:  # noqa: BLE001
-                        set_first_error(exc)
+                        wrapped = _stage_error(
+                            stage="download",
+                            symbol=symbol,
+                            day_start_ms=job.day_start_ms,
+                            details=_format_exc_message(exc),
+                        )
+                        set_first_error(wrapped)
                     finally:
                         elapsed = time.perf_counter() - active_started
                         with first_error_lock:
@@ -549,6 +652,8 @@ def fetch_aggtrades_range(
                     ):
                         parsed_rows += int(len(chunk.index))
                         persist_queue.put(_PersistChunk(day_start_ms=downloaded.day_start_ms, frame=chunk))
+                    if parsed_rows == 0:
+                        raise RuntimeError(f"No rows parsed for day {_day_label(downloaded.day_start_ms)}")
                     persist_queue.put(_PersistDayDone(day_start_ms=downloaded.day_start_ms))
                     parse_elapsed = time.perf_counter() - parse_started
                     with day_metrics_lock:
@@ -556,7 +661,15 @@ def fetch_aggtrades_range(
                         metric.parse_seconds += parse_elapsed
                         metric.parsed_rows += parsed_rows
                 except Exception as exc:  # noqa: BLE001
-                    set_first_error(exc)
+                    wrapped = _stage_error(
+                        stage="parse",
+                        symbol=symbol,
+                        day_start_ms=downloaded.day_start_ms,
+                        details=_format_exc_message(exc),
+                    )
+                    if maybe_skip_day(day_start_ms=downloaded.day_start_ms, stage="parse", exc=wrapped):
+                        continue
+                    set_first_error(wrapped)
                 finally:
                     elapsed = time.perf_counter() - active_started
                     with first_error_lock:
@@ -624,7 +737,25 @@ def fetch_aggtrades_range(
                         with results_lock:
                             results.append(_DayResult(day_start_ms=day_start_ms, output_path=output_path))
                 except Exception as exc:  # noqa: BLE001
-                    set_first_error(exc)
+                    day_start_ms = item.day_start_ms if isinstance(item, (_PersistChunk, _PersistDayDone)) else -1
+                    if day_start_ms >= 0:
+                        wrapped = _stage_error(
+                            stage="persist",
+                            symbol=symbol,
+                            day_start_ms=day_start_ms,
+                            details=_format_exc_message(exc),
+                        )
+                        temp_path = day_temp_paths.get(day_start_ms)
+                        if temp_path is not None and temp_path.exists():
+                            temp_path.unlink()
+                        day_has_rows.pop(day_start_ms, None)
+                        day_output_paths.pop(day_start_ms, None)
+                        day_temp_paths.pop(day_start_ms, None)
+                        if maybe_skip_day(day_start_ms=day_start_ms, stage="persist", exc=wrapped):
+                            continue
+                        set_first_error(wrapped)
+                    else:
+                        set_first_error(exc)
                 finally:
                     elapsed = time.perf_counter() - active_started
                     with write_elapsed_lock:
@@ -654,10 +785,18 @@ def fetch_aggtrades_range(
     if first_error:
         raise RuntimeError("Aggtrades archive fetch failed") from first_error[0]
 
+    skipped_day_keys = set(skipped_days)
     ordered_paths = [
         result.output_path
         for result in sorted(results, key=lambda item: item.day_start_ms)
+        if result.day_start_ms not in skipped_day_keys
     ]
+    if not ordered_paths:
+        if first_error:
+            raise RuntimeError("Aggtrades archive fetch failed") from first_error[0]
+        raise RuntimeError("Aggtrades archive fetch failed") from RuntimeError(
+            "All requested days were skipped due to malformed archive data"
+        )
 
     csv_path = _concatenate_daily_files(
         symbol=symbol,
@@ -739,6 +878,14 @@ def fetch_aggtrades_range(
             }
             for day_start_ms, metrics in sorted(day_metrics.items())
         ],
+        "skipped_days": [
+            {
+                "day_start_ms": day_start_ms,
+                "day": _day_label(day_start_ms),
+                "reason": reason,
+            }
+            for day_start_ms, reason in sorted(skipped_days.items())
+        ],
         "output_csv_path": str(csv_path),
     }
     metrics_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -747,6 +894,7 @@ def fetch_aggtrades_range(
         f"parse={report['aggregate']['parse_rows_s']:.0f} rows/s, "
         f"persist={report['aggregate']['persist_rows_s']:.0f} rows/s, "
         f"retries={total_retries}, "
+        f"skipped_days={len(skipped_days)}, "
         f"util(d/p/w)="
         f"{report['aggregate']['worker_utilization']['download']:.2f}/"
         f"{report['aggregate']['worker_utilization']['parse']:.2f}/"
