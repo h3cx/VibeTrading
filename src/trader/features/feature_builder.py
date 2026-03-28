@@ -26,6 +26,7 @@ from trader.data.registry import (
     timestamp_ms_to_iso,
     write_dataset_manifest,
 )
+from trader.data.storage import features_dataset_dir, write_tag
 
 console = Console()
 
@@ -95,35 +96,18 @@ def _select_overlapping_files(directory: Path, start_ms: int, end_ms: int) -> li
     return selected
 
 
-def _build_output_path(
-    symbol: str,
-    dataset_name: str,
-    timeframe: str,
-    start_ms: int,
-    end_ms: int,
-) -> Path:
-    out_dir = Path("data/features") / symbol
+def _build_output_path(symbol: str, dataset_id: str) -> Path:
+    out_dir = features_dataset_dir(symbol=symbol, dataset_id=dataset_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{dataset_name}_{timeframe}_{_utc_stamp(start_ms)}__{_utc_stamp(end_ms)}.csv"
-    return out_dir / filename
+    return out_dir / "features.csv"
 
 
 def _open_output_csv(
     symbol: str,
-    dataset_name: str,
-    timeframe: str,
-    start_ms: int,
-    end_ms: int,
+    dataset_id: str,
     include_kline_context: bool,
 ) -> tuple[Path, Path, Any, csv.writer]:
-    final_path = _build_output_path(
-        symbol=symbol,
-        dataset_name=dataset_name,
-        timeframe=timeframe,
-        start_ms=start_ms,
-        end_ms=end_ms,
-    )
+    final_path = _build_output_path(symbol=symbol, dataset_id=dataset_id)
     part_path = final_path.with_suffix(final_path.suffix + ".part")
 
     handle = part_path.open("w", newline="", encoding="utf-8")
@@ -500,12 +484,26 @@ def build_feature_frames(
     ret_30_window: deque[float] = deque(maxlen=30)
     notional_volume_30_window: deque[float] = deque(maxlen=30)
 
+    source_info = {
+        "exchange": "binance",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "timeframe_s": timeframe_s,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "include_kline_context": include_kline_context,
+        "aggtrade_files": [str(path) for path in agg_source_paths],
+        "kline_files": [str(path) for path in kline_source_paths],
+    }
+    params_info = {
+        "dataset_name": dataset_name,
+        "include_kline_context": include_kline_context,
+    }
+    dataset_id = build_dataset_id(source=source_info, params=params_info)
+
     final_path, part_path, handle, writer = _open_output_csv(
         symbol=symbol,
-        dataset_name=dataset_name,
-        timeframe=timeframe,
-        start_ms=start_ms,
-        end_ms=end_ms,
+        dataset_id=dataset_id,
         include_kline_context=include_kline_context,
     )
 
@@ -676,22 +674,6 @@ def build_feature_frames(
             part_path=part_path,
             handle=handle,
         )
-        source_info = {
-            "exchange": "binance",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "timeframe_s": timeframe_s,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "include_kline_context": include_kline_context,
-            "aggtrade_files": [str(path) for path in agg_source_paths],
-            "kline_files": [str(path) for path in kline_source_paths],
-        }
-        params_info = {
-            "dataset_name": dataset_name,
-            "include_kline_context": include_kline_context,
-        }
-        dataset_id = build_dataset_id(source=source_info, params=params_info)
         csv_summary = summarize_csv_artifact(out_path)
 
         manifest = {
@@ -716,6 +698,7 @@ def build_feature_frames(
             dataset_id=dataset_id,
             manifest=manifest,
         )
+        write_tag(base_dir=Path("data/features") / symbol, tag="latest", target_id=dataset_id)
         return out_path
 
     except Exception:

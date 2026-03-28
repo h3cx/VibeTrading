@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 import json
@@ -17,6 +16,13 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from trader.baseline.train_baseline import BaselineMLP, LABEL_NAMES
+from trader.data.registry import build_dataset_id
+from trader.data.storage import (
+    resolve_backtest_run_dir,
+    resolve_baseline_run_dir,
+    resolve_labels_dataset_dir,
+    write_tag,
+)
 
 console = Console()
 
@@ -29,43 +35,12 @@ class SplitData:
     timestamps_ms: np.ndarray
 
 
-def _utc_stamp(ms: int) -> str:
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y%m%d_%H%M%S")
-
-
 def _find_latest_checkpoint(symbol: str) -> Path:
-    model_dir = Path("models") / "baseline" / symbol
-    if not model_dir.exists():
-        raise FileNotFoundError(f"No model directory found for {symbol}: {model_dir}")
-
-    candidates = sorted(
-        model_dir.glob("**/model.pt"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not candidates:
-        raise FileNotFoundError(f"No checkpoint files found in {model_dir}")
-
-    return candidates[0]
+    return resolve_baseline_run_dir(symbol=symbol, latest=True) / "model.pt"
 
 
 def _find_latest_label_file(symbol: str) -> Path:
-    label_dir = Path("data/labels") / symbol
-    if not label_dir.exists():
-        raise FileNotFoundError(f"No label directory found for {symbol}: {label_dir}")
-
-    candidates = sorted(
-        label_dir.glob("*.csv"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not candidates:
-        raise FileNotFoundError(f"No label CSV files found for {symbol} in {label_dir}")
-
-    return candidates[0]
+    return resolve_labels_dataset_dir(symbol=symbol, latest=True) / "labels.csv"
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:
@@ -270,6 +245,7 @@ def backtest_baseline(
     long_threshold: float = 0.80,
     short_threshold: float = 0.80,
     margin: float = 0.05,
+    run_tag: str | None = "latest",
 ) -> Path:
     if eval_split not in {"train", "val", "test", "all"}:
         raise ValueError("eval_split must be one of: train, val, test, all")
@@ -437,7 +413,23 @@ def backtest_baseline(
 
     max_drawdown_pct = _max_drawdown_pct(equity_curve)
 
-    out_dir = Path("backtests") / "baseline" / symbol / checkpoint_file.parent.name / eval_split
+    run_source = {
+        "symbol": symbol,
+        "checkpoint_path": str(checkpoint_file),
+        "label_csv_path": str(label_file),
+        "eval_split": eval_split,
+    }
+    run_params = {
+        "train_frac": train_frac,
+        "val_frac": val_frac,
+        "batch_size": batch_size,
+        "long_threshold": long_threshold,
+        "short_threshold": short_threshold,
+        "margin": margin,
+    }
+    run_id = build_dataset_id(source=run_source, params=run_params)
+
+    out_dir = resolve_backtest_run_dir(symbol=symbol, run_id=run_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     report_path = out_dir / "report.json"
@@ -479,6 +471,7 @@ def backtest_baseline(
             "LONG_SETUP": int((threshold_preds == 1).sum()),
             "SHORT_SETUP": int((threshold_preds == 2).sum()),
         },
+        "run_id": run_id,
     }
 
     with report_path.open("w", encoding="utf-8") as handle:
@@ -500,5 +493,8 @@ def backtest_baseline(
         f"max_dd={max_drawdown_pct:.2f}% "
         f"profit_factor={profit_factor:.4f}"
     )
+
+    if run_tag:
+        write_tag(base_dir=Path("artifacts") / "backtests" / symbol, tag=run_tag, target_id=run_id)
 
     return report_path

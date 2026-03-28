@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 import json
@@ -21,6 +20,9 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from sklearn.metrics import classification_report, confusion_matrix
+
+from trader.data.registry import build_dataset_id, find_dataset_id_by_artifact
+from trader.data.storage import baseline_run_dir, resolve_labels_dataset_dir, write_tag
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -57,32 +59,8 @@ class BaselineMLP(nn.Module):
         return self.net(x)
 
 
-def _utc_stamp(ms: int) -> str:
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y%m%d_%H%M%S")
-
-
-def _build_output_dir(symbol: str, model_name: str, start_ms: int, end_ms: int) -> Path:
-    out_dir = Path("models") / "baseline" / symbol / f"{model_name}_{_utc_stamp(start_ms)}__{_utc_stamp(end_ms)}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
-
-
 def _find_latest_label_file(symbol: str) -> Path:
-    label_dir = Path("data/labels") / symbol
-    if not label_dir.exists():
-        raise FileNotFoundError(f"No label directory found for {symbol}: {label_dir}")
-
-    candidates = sorted(
-        label_dir.glob("*.csv"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not candidates:
-        raise FileNotFoundError(f"No label CSV files found for {symbol} in {label_dir}")
-
-    return candidates[0]
+    return resolve_labels_dataset_dir(symbol=symbol, latest=True) / "labels.csv"
 
 
 def _set_seed(seed: int) -> None:
@@ -260,6 +238,7 @@ def train_baseline(
     val_frac: float = 0.15,
     use_class_weights: bool = True,
     seed: int = 42,
+    run_tag: str | None = "latest",
 ) -> Path:
     if epochs <= 0:
         raise ValueError("epochs must be greater than 0")
@@ -428,12 +407,28 @@ def train_baseline(
 
     test_cm = confusion_matrix(y_test_true, y_test_pred, labels=labels)
 
-    out_dir = _build_output_dir(
-        symbol=symbol,
-        model_name=model_name,
-        start_ms=int(timestamps_ms[0]),
-        end_ms=int(timestamps_ms[-1]) + 1000,
+    label_dataset_id = find_dataset_id_by_artifact(
+        dataset_type="labels",
+        artifact_path=Path(input_path) if input_path else _find_latest_label_file(symbol),
     )
+    run_source = {
+        "symbol": symbol,
+        "label_dataset_id": label_dataset_id,
+        "model_name": model_name,
+        "train_frac": train_frac,
+        "val_frac": val_frac,
+    }
+    run_params = {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "use_class_weights": use_class_weights,
+        "seed": seed,
+    }
+    run_id = build_dataset_id(source=run_source, params=run_params)
+
+    out_dir = baseline_run_dir(symbol=symbol, run_id=run_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint_path = out_dir / "model.pt"
     report_path = out_dir / "report.json"
@@ -449,6 +444,8 @@ def train_baseline(
         "label_mapping": LABEL_NAMES,
         "model_name": model_name,
         "symbol": symbol,
+        "run_id": run_id,
+        "label_dataset_id": label_dataset_id,
     }
     torch.save(checkpoint, checkpoint_path)
 
@@ -472,6 +469,8 @@ def train_baseline(
         "val_report": val_report,
         "test_report": test_report,
         "test_confusion_matrix": test_cm.tolist(),
+        "run_id": run_id,
+        "label_dataset_id": label_dataset_id,
     }
 
     with report_path.open("w", encoding="utf-8") as handle:
@@ -496,5 +495,8 @@ def train_baseline(
         f"macro_f1={macro_f1:.4f} "
         f"weighted_f1={weighted_f1:.4f}"
     )
+
+    if run_tag:
+        write_tag(base_dir=Path("models") / "baseline" / symbol, tag=run_tag, target_id=run_id)
 
     return checkpoint_path
