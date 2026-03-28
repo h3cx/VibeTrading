@@ -52,3 +52,9 @@ See: `docs/longer-term-baseline.md`
 
 - This is research code and not financial advice.
 - Start with one symbol and short date ranges to validate setup before scaling.
+## Known Limitations
+
+A current QA sweep identified active correctness and consistency gaps in the pipeline (including feature-build runtime failure and train/backtest parity issues).
+
+See: `docs/qa/codebase-audit-report.md`
+
