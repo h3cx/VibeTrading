@@ -170,6 +170,11 @@ def fetch_aggtrades_cmd() -> None:
         choices=["y", "n"],
         default="n",
     )
+    skip_bad_days = Prompt.ask(
+        "Skip malformed day archives instead of failing the whole run?",
+        choices=["y", "n"],
+        default="n",
+    )
 
     if not symbol_exists(symbol):
         console.print(f"[red]Symbol not tradable or not found: {symbol}[/red]")
@@ -189,6 +194,7 @@ def fetch_aggtrades_cmd() -> None:
         max_retries=max_retries,
         retry_backoff_s=retry_backoff_s,
         sequential=(sequential == "y"),
+        skip_bad_days=(skip_bad_days == "y"),
     )
     console.print(f"[green]Saved aggtrades to {out.csv_path}[/green]")
     console.print(f"[green]Saved fetch profiling report to {out.metrics_path}[/green]")

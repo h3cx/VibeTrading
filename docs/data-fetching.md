@@ -66,3 +66,13 @@ Success criteria:
 - Memory remains stable (no unbounded growth during the longer run).
 
 If 30-day throughput degrades substantially vs 7-day, re-check stage utilization and queue waits to identify the constrained stage.
+
+
+## Archive parser resilience policy
+
+Aggtrades archive parsing now tolerates common day-file quality issues while keeping pipeline concurrency:
+
+- Header rows inside archive CSV payloads are ignored safely.
+- Malformed rows are coerced at chunk-level and dropped if required numeric/bool fields are invalid.
+- If `skip_bad_days` is enabled from CLI, parse/persist failures on one day are recorded under `skipped_days` in the report and the rest of the range continues.
+- Download-stage failures still abort the run because no archive payload exists for that day.

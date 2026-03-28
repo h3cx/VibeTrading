@@ -73,15 +73,22 @@ Fetches aggregate trade stream data for a symbol/date range.
 | `Aggtrades source` | enum | `auto` | Data source strategy: `auto`, `rest`, or `archive`. |
 | `Max download workers` | int | `6` | Number of daily archive downloads/decompressions run in parallel. |
 | `Max inflight days (bounded queue for backpressure)` | int | `12` | Producer queue bound; larger values can improve throughput but increase transient memory pressure. |
+| `Max parse workers` | int | `4` | Number of archive parse/decompression workers. |
+| `Max parsed batches (bounded parse->persist queue)` | int | `12` | Queue bound between parse and persist stages. |
+| `Parse chunk size rows` | int | `250000` | Per-chunk row budget during archive CSV parsing. |
 | `Request timeout seconds` | float | `30` | Per-request timeout for archive downloads. |
 | `Max retries per day` | int | `3` | Retry count per failed day download before aborting the entire fetch. |
 | `Retry backoff base seconds` | float | `1` | Exponential backoff base (`base * 2^attempt`) between retries. |
+| `Sequential mode? (debug fallback; disables pipeline)` | enum (`y`/`n`) | `n` | Forces single-threaded download/parse/persist execution. |
+| `Skip malformed day archives instead of failing the whole run?` | enum (`y`/`n`) | `n` | If `y`, parse/persist failures are logged and skipped; download failures still stop the run. |
 
 ### Notes
 
 - Symbol validity is checked before fetch.
 - Use same date range as klines for coherent downstream features.
 - RAM tradeoff: each additional worker typically adds ~40-120MB peak RAM while a day archive is in-memory during decompress/write.
+- Parser resilience: archive header rows and malformed lines are filtered during chunk sanitization before dtype casting.
+- When skip mode is enabled, skipped day metadata is written in the fetch report (`skipped_days`).
 
 ---
 
