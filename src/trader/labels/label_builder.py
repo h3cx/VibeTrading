@@ -14,6 +14,14 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from trader.data.registry import (
+    build_dataset_id,
+    build_source_entries,
+    find_dataset_id_by_artifact,
+    summarize_csv_artifact,
+    timestamp_ms_to_iso,
+    write_dataset_manifest,
+)
 
 console = Console()
 
@@ -515,6 +523,59 @@ def build_labels(
             dataset_name=dataset_name,
             start_ms=first_ts_ms,
             end_ms=last_ts_ms + 1000,
+        )
+
+        timeframe = f"{timeframe_s}s"
+        source_info = {
+            "symbol": symbol,
+            "feature_artifact": str(feature_path),
+            "timeframe": timeframe,
+            "timeframe_s": timeframe_s,
+            "start_ms": first_ts_ms,
+            "end_ms": last_ts_ms + 1000,
+        }
+        params_info = {
+            "dataset_name": dataset_name,
+            "horizon_steps": horizon_steps,
+            "take_profit_pct": take_profit_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "fee_pct": fee_pct,
+            "slippage_pct": slippage_pct,
+        }
+        dataset_id = build_dataset_id(source=source_info, params=params_info)
+        parent_dataset_id = find_dataset_id_by_artifact(
+            dataset_type="features",
+            artifact_path=feature_path,
+        )
+        csv_summary = summarize_csv_artifact(out_path, class_column="label_name")
+
+        manifest = {
+            "artifact_path": str(out_path),
+            "symbol": symbol,
+            "symbols": [symbol],
+            "timeframe": timeframe,
+            "timeframe_s": timeframe_s,
+            "date_range": {
+                "start_ms": first_ts_ms,
+                "end_ms": last_ts_ms + 1000,
+                "start_at": timestamp_ms_to_iso(first_ts_ms),
+                "end_at": timestamp_ms_to_iso(last_ts_ms + 1000),
+            },
+            "source_raw_files": build_source_entries([feature_path]),
+            "labeling_params": {
+                "horizon_steps": horizon_steps,
+                "take_profit_pct": take_profit_pct,
+                "stop_loss_pct": stop_loss_pct,
+                "fee_pct": fee_pct,
+                "slippage_pct": slippage_pct,
+            },
+            "parent_dataset_id": parent_dataset_id,
+            **csv_summary,
+        }
+        write_dataset_manifest(
+            dataset_type="labels",
+            dataset_id=dataset_id,
+            manifest=manifest,
         )
 
         console.print(

@@ -19,6 +19,13 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from trader.data.registry import (
+    build_dataset_id,
+    build_source_entries,
+    summarize_csv_artifact,
+    timestamp_ms_to_iso,
+    write_dataset_manifest,
+)
 
 console = Console()
 
@@ -241,9 +248,10 @@ def _iter_aggtrade_second_aggregates(
     symbol: str,
     start_ms: int,
     end_ms: int,
+    paths: list[Path] | None = None,
 ) -> Iterator[dict[str, float | int]]:
     agg_dir = Path("data/raw/binance") / symbol / "aggtrades"
-    paths = _select_overlapping_files(agg_dir, start_ms, end_ms)
+    paths = paths if paths is not None else _select_overlapping_files(agg_dir, start_ms, end_ms)
 
     if not paths:
         raise FileNotFoundError(f"No aggtrades CSV files found for {symbol} in {agg_dir}")
@@ -344,9 +352,10 @@ def _load_kline_context(
     symbol: str,
     start_ms: int,
     end_ms: int,
+    paths: list[Path] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float, float]], tuple[float, float, float, float] | None]:
     kline_dir = Path("data/raw/binance") / symbol / "klines"
-    paths = _select_overlapping_files(kline_dir, start_ms, end_ms)
+    paths = paths if paths is not None else _select_overlapping_files(kline_dir, start_ms, end_ms)
 
     if not paths:
         raise FileNotFoundError(f"No kline CSV files found for {symbol} in {kline_dir}")
@@ -444,19 +453,33 @@ def build_feature_frames(
     total_seconds = end_second - start_second + 1
     total_bars = math.ceil(total_seconds / timeframe_s)
 
+    agg_source_paths = _select_overlapping_files(
+        Path("data/raw/binance") / symbol / "aggtrades",
+        start_ms,
+        end_ms,
+    )
+
     kline_context: dict[int, tuple[float, float, float, float]] = {}
     first_kline: tuple[float, float, float, float] | None = None
+    kline_source_paths: list[Path] = []
     if include_kline_context:
+        kline_source_paths = _select_overlapping_files(
+            Path("data/raw/binance") / symbol / "klines",
+            start_ms,
+            end_ms,
+        )
         kline_context, first_kline = _load_kline_context(
             symbol=symbol,
             start_ms=start_ms,
             end_ms=end_ms,
+            paths=kline_source_paths,
         )
 
     agg_iter = _iter_aggtrade_second_aggregates(
         symbol=symbol,
         start_ms=start_ms,
         end_ms=end_ms,
+        paths=agg_source_paths,
     )
 
     first_agg = next(agg_iter, None)
@@ -648,11 +671,52 @@ def build_feature_frames(
                 bars_written += 1
                 progress.update(task_id, rows=bars_written)
 
-        return _finalize_output_csv(
+        out_path = _finalize_output_csv(
             final_path=final_path,
             part_path=part_path,
             handle=handle,
         )
+        source_info = {
+            "exchange": "binance",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timeframe_s": timeframe_s,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "include_kline_context": include_kline_context,
+            "aggtrade_files": [str(path) for path in agg_source_paths],
+            "kline_files": [str(path) for path in kline_source_paths],
+        }
+        params_info = {
+            "dataset_name": dataset_name,
+            "include_kline_context": include_kline_context,
+        }
+        dataset_id = build_dataset_id(source=source_info, params=params_info)
+        csv_summary = summarize_csv_artifact(out_path)
+
+        manifest = {
+            "artifact_path": str(out_path),
+            "symbol": symbol,
+            "symbols": [symbol],
+            "timeframe": timeframe,
+            "timeframe_s": timeframe_s,
+            "date_range": {
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "start_at": timestamp_ms_to_iso(start_ms),
+                "end_at": timestamp_ms_to_iso(end_ms),
+            },
+            "source_raw_files": build_source_entries(agg_source_paths + kline_source_paths),
+            "labeling_params": {},
+            "parent_dataset_id": None,
+            **csv_summary,
+        }
+        write_dataset_manifest(
+            dataset_type="features",
+            dataset_id=dataset_id,
+            manifest=manifest,
+        )
+        return out_path
 
     except Exception:
         _cleanup_part_file(part_path=part_path, handle=handle)
