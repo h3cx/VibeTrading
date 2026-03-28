@@ -439,6 +439,11 @@ def build_feature_frames(
 
     kline_context: dict[int, tuple[float, float, float, float]] = {}
     first_kline: tuple[float, float, float, float] | None = None
+    agg_source_paths = _select_overlapping_files(
+        Path("data/raw/binance") / symbol / "aggtrades",
+        start_ms,
+        end_ms,
+    )
     kline_source_paths: list[Path] = []
     if include_kline_context:
         kline_source_paths = _select_overlapping_files(

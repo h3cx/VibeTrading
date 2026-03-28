@@ -263,6 +263,8 @@ def train_baseline_cmd() -> None:
     dropout = float(Prompt.ask("Dropout", default="0.15"))
     train_frac = float(Prompt.ask("Train fraction", default="0.70"))
     val_frac = float(Prompt.ask("Validation fraction", default="0.15"))
+    seed = int(Prompt.ask("Random seed", default="42"))
+    run_tag = Prompt.ask("Run tag", default="latest").strip() or None
     use_class_weights = Prompt.ask(
         "Use class weights?",
         choices=["y", "n"],
@@ -282,6 +284,8 @@ def train_baseline_cmd() -> None:
         dropout=dropout,
         train_frac=train_frac,
         val_frac=val_frac,
+        seed=seed,
+        run_tag=run_tag,
         use_class_weights=(use_class_weights == "y"),
     )
     console.print(f"[green]Saved baseline model to {out}[/green]")
@@ -305,6 +309,7 @@ def backtest_baseline_cmd() -> None:
     long_threshold = float(Prompt.ask("Long probability threshold", default="0.80"))
     short_threshold = float(Prompt.ask("Short probability threshold", default="0.80"))
     margin = float(Prompt.ask("Trade-vs-no-trade margin", default="0.05"))
+    run_tag = Prompt.ask("Run tag", default="latest").strip() or None
 
     out = backtest_baseline(
         symbol=symbol,
@@ -317,6 +322,7 @@ def backtest_baseline_cmd() -> None:
         long_threshold=long_threshold,
         short_threshold=short_threshold,
         margin=margin,
+        run_tag=run_tag,
     )
     console.print(f"[green]Saved backtest report to {out}[/green]")
 

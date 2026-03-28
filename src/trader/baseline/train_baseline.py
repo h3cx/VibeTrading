@@ -120,6 +120,8 @@ def _set_seed(seed: int) -> None:
 
 def _load_labels(symbol: str, input_path: str | None = None) -> pd.DataFrame:
     path = Path(input_path) if input_path else _find_latest_label_file(symbol)
+    if not path.exists():
+        raise FileNotFoundError(f"Label file does not exist: {path}")
     console.print(f"[cyan]Loading labels from[/cyan] {path}")
 
     df = cast(pd.DataFrame, pd.read_csv(path))
@@ -135,6 +137,8 @@ def _load_labels(symbol: str, input_path: str | None = None) -> pd.DataFrame:
 
     df = cast(pd.DataFrame, df.dropna(subset=["timestamp_ms", "label"]))
     df = cast(pd.DataFrame, df.sort_values(by="timestamp_ms"))
+    # Keep parity with backtest preprocessing so split boundaries and class mix align.
+    df = cast(pd.DataFrame, df.drop_duplicates(subset=["timestamp_ms"], keep="last"))
     df = cast(pd.DataFrame, df.reset_index(drop=True))
 
     if df.empty:
