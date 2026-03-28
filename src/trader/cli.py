@@ -144,9 +144,32 @@ def fetch_aggtrades_cmd() -> None:
             default="12",
         )
     )
+    max_parse_workers = int(
+        Prompt.ask(
+            "Max parse workers",
+            default="4",
+        )
+    )
+    max_parsed_batches = int(
+        Prompt.ask(
+            "Max parsed batches (bounded parse->persist queue)",
+            default="12",
+        )
+    )
+    parse_chunksize_rows = int(
+        Prompt.ask(
+            "Parse chunk size rows",
+            default="250000",
+        )
+    )
     request_timeout_s = float(Prompt.ask("Request timeout seconds", default="30"))
     max_retries = int(Prompt.ask("Max retries per day", default="3"))
     retry_backoff_s = float(Prompt.ask("Retry backoff base seconds", default="1"))
+    sequential = Prompt.ask(
+        "Sequential mode? (debug fallback; disables pipeline)",
+        choices=["y", "n"],
+        default="n",
+    )
 
     if not symbol_exists(symbol):
         console.print(f"[red]Symbol not tradable or not found: {symbol}[/red]")
@@ -159,9 +182,13 @@ def fetch_aggtrades_cmd() -> None:
         source=source,
         max_download_workers=max_download_workers,
         max_inflight_days=max_inflight_days,
+        max_parse_workers=max_parse_workers,
+        max_parsed_batches=max_parsed_batches,
+        parse_chunksize_rows=parse_chunksize_rows,
         request_timeout_s=request_timeout_s,
         max_retries=max_retries,
         retry_backoff_s=retry_backoff_s,
+        sequential=(sequential == "y"),
     )
     console.print(f"[green]Saved aggtrades to {out}[/green]")
 
