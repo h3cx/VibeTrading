@@ -21,7 +21,12 @@ from rich.progress import (
 )
 from sklearn.metrics import classification_report, confusion_matrix
 
-from trader.data.registry import build_dataset_id, find_dataset_id_by_artifact
+from trader.data.registry import (
+    build_dataset_id,
+    current_git_commit_sha,
+    find_dataset_id_by_artifact,
+    write_run_manifest,
+)
 from trader.data.storage import baseline_run_dir, resolve_labels_dataset_dir, write_tag
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -498,5 +503,45 @@ def train_baseline(
 
     if run_tag:
         write_tag(base_dir=Path("models") / "baseline" / symbol, tag=run_tag, target_id=run_id)
+
+    run_manifest = {
+        "run_type": "baseline_train",
+        "git_commit_sha": current_git_commit_sha(),
+        "input_dataset_ids": {
+            "labels": label_dataset_id,
+        },
+        "hyperparameters": {
+            "model_name": model_name,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "use_class_weights": use_class_weights,
+            "seed": seed,
+        },
+        "split_config": {
+            "method": "time_ordered",
+            "train_frac": train_frac,
+            "val_frac": val_frac,
+            "test_frac": 1.0 - train_frac - val_frac,
+            "train_rows": int(len(train_split.x)),
+            "val_rows": int(len(val_split.x)),
+            "test_rows": int(len(test_split.x)),
+        },
+        "output_artifact_paths": {
+            "checkpoint": str(checkpoint_path),
+            "report": str(report_path),
+            "backtest": None,
+        },
+        "core_metrics": {
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+            "sharpe_ratio": None,
+            "profit_factor": None,
+            "cumulative_return_pct": None,
+        },
+        "notes_tags": [run_tag] if run_tag else [],
+    }
+    manifest_path = write_run_manifest(run_id=run_id, manifest=run_manifest)
+    console.print(f"[green]Saved run manifest:[/green] {manifest_path}")
 
     return checkpoint_path

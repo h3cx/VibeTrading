@@ -11,12 +11,17 @@ import numpy as np
 import pandas as pd
 import torch
 from rich.console import Console
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from trader.baseline.train_baseline import BaselineMLP, LABEL_NAMES
-from trader.data.registry import build_dataset_id
+from trader.data.registry import (
+    build_dataset_id,
+    current_git_commit_sha,
+    find_dataset_id_by_artifact,
+    write_run_manifest,
+)
 from trader.data.storage import (
     resolve_backtest_run_dir,
     resolve_baseline_run_dir,
@@ -234,6 +239,16 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
     return abs(max_dd) * 100.0
 
 
+def _sharpe_ratio_from_returns_pct(returns_pct: np.ndarray) -> float:
+    if returns_pct.size < 2:
+        return 0.0
+    std = float(returns_pct.std(ddof=1))
+    if std <= 1e-12:
+        return 0.0
+    mean = float(returns_pct.mean())
+    return float((mean / std) * math.sqrt(float(returns_pct.size)))
+
+
 def backtest_baseline(
     symbol: str,
     checkpoint_path: str | None = None,
@@ -321,6 +336,14 @@ def backtest_baseline(
     )
 
     cm = confusion_matrix(split.y, threshold_preds, labels=[0, 1, 2])
+    threshold_report = classification_report(
+        split.y,
+        threshold_preds,
+        labels=[0, 1, 2],
+        target_names=[LABEL_NAMES[i] for i in [0, 1, 2]],
+        output_dict=True,
+        zero_division=0,
+    )
 
     eval_df = split.df.copy()
     eval_df["p_no_trade"] = probs[:, 0]
@@ -412,6 +435,14 @@ def backtest_baseline(
         avg_hold_s = 0.0
 
     max_drawdown_pct = _max_drawdown_pct(equity_curve)
+    sharpe_ratio = _sharpe_ratio_from_returns_pct(
+        cast(pd.Series, trade_df["return_pct"]).to_numpy(dtype=np.float64)
+        if trade_count
+        else np.array([], dtype=np.float64)
+    )
+    threshold_accuracy = float(threshold_report["accuracy"])
+    threshold_macro_f1 = float(threshold_report["macro avg"]["f1-score"])
+    label_dataset_id = find_dataset_id_by_artifact(dataset_type="labels", artifact_path=label_file)
 
     run_source = {
         "symbol": symbol,
@@ -472,6 +503,7 @@ def backtest_baseline(
             "SHORT_SETUP": int((threshold_preds == 2).sum()),
         },
         "run_id": run_id,
+        "threshold_report": threshold_report,
     }
 
     with report_path.open("w", encoding="utf-8") as handle:
@@ -496,5 +528,43 @@ def backtest_baseline(
 
     if run_tag:
         write_tag(base_dir=Path("artifacts") / "backtests" / symbol, tag=run_tag, target_id=run_id)
+
+    run_manifest = {
+        "run_type": "baseline_backtest",
+        "git_commit_sha": current_git_commit_sha(),
+        "input_dataset_ids": {
+            "labels": label_dataset_id,
+            "checkpoint_run_id": checkpoint.get("run_id"),
+        },
+        "hyperparameters": {
+            "batch_size": batch_size,
+            "long_threshold": long_threshold,
+            "short_threshold": short_threshold,
+            "margin": margin,
+            "eval_split": eval_split,
+        },
+        "split_config": {
+            "method": "time_ordered",
+            "train_frac": train_frac,
+            "val_frac": val_frac,
+            "test_frac": 1.0 - train_frac - val_frac,
+            "rows_evaluated": int(len(eval_df)),
+        },
+        "output_artifact_paths": {
+            "checkpoint": str(checkpoint_file),
+            "report": str(report_path),
+            "backtest": str(trades_path),
+        },
+        "core_metrics": {
+            "accuracy": threshold_accuracy,
+            "macro_f1": threshold_macro_f1,
+            "sharpe_ratio": sharpe_ratio,
+            "profit_factor": profit_factor,
+            "cumulative_return_pct": cumulative_return_pct,
+        },
+        "notes_tags": [run_tag] if run_tag else [],
+    }
+    manifest_path = write_run_manifest(run_id=run_id, manifest=run_manifest)
+    console.print(f"[green]Saved run manifest:[/green] {manifest_path}")
 
     return report_path
