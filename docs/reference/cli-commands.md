@@ -71,11 +71,17 @@ Fetches aggregate trade stream data for a symbol/date range.
 | `Start date (YYYY-MM-DD)` | date string | none | Inclusive start date. |
 | `End date (YYYY-MM-DD)` | date string | none | End date boundary supplied to fetch function. |
 | `Aggtrades source` | enum | `auto` | Data source strategy: `auto`, `rest`, or `archive`. |
+| `Max download workers` | int | `6` | Number of daily archive downloads/decompressions run in parallel. |
+| `Max inflight days (bounded queue for backpressure)` | int | `12` | Producer queue bound; larger values can improve throughput but increase transient memory pressure. |
+| `Request timeout seconds` | float | `30` | Per-request timeout for archive downloads. |
+| `Max retries per day` | int | `3` | Retry count per failed day download before aborting the entire fetch. |
+| `Retry backoff base seconds` | float | `1` | Exponential backoff base (`base * 2^attempt`) between retries. |
 
 ### Notes
 
 - Symbol validity is checked before fetch.
 - Use same date range as klines for coherent downstream features.
+- RAM tradeoff: each additional worker typically adds ~40-120MB peak RAM while a day archive is in-memory during decompress/write.
 
 ---
 
