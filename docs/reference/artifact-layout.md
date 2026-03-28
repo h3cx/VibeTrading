@@ -9,6 +9,7 @@ This document describes where pipeline outputs are written and how to identify k
 - Labels: `data/labels/`
 - Training model outputs: `models/`
 - Backtest outputs: `artifacts/backtests/`
+- Fetch profiling reports: `artifacts/fetch_reports/`
 - Dataset registry manifests: `data/registry/`
 - Run manifests: `runs/`
 
@@ -110,7 +111,19 @@ These manifests store artifact path, source ranges, schema summaries, and creati
 
 These manifests store run type, git SHA, core metrics, hyperparameters, and output artifact paths.
 
-## 7) Quick path examples
+## 7) Fetch profiling reports
+
+### Folder pattern
+
+`artifacts/fetch_reports/<RUN_ID>.json`
+
+### Key fields
+
+- Per-day timings and counters (`download_seconds`, `parse_seconds`, `write_seconds`, `archive_bytes`, `parsed_rows`, `persisted_rows`, `retries`).
+- Aggregate throughput (`effective_download_mb_s`, `parse_rows_s`, `persist_rows_s`).
+- Worker utilization and queue wait diagnostics.
+
+## 8) Quick path examples
 
 For `BTCUSDT`:
 
@@ -122,3 +135,4 @@ For `BTCUSDT`:
 - Backtest report: `artifacts/backtests/BTCUSDT/<run_id>/report.json`
 - Backtest trades: `artifacts/backtests/BTCUSDT/<run_id>/trades.csv`
 - Backtest predictions: `artifacts/backtests/BTCUSDT/<run_id>/predictions.csv`
+- Fetch profile report: `artifacts/fetch_reports/<run_id>.json`

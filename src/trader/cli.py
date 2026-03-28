@@ -190,7 +190,9 @@ def fetch_aggtrades_cmd() -> None:
         retry_backoff_s=retry_backoff_s,
         sequential=(sequential == "y"),
     )
-    console.print(f"[green]Saved aggtrades to {out}[/green]")
+    console.print(f"[green]Saved aggtrades to {out.csv_path}[/green]")
+    console.print(f"[green]Saved fetch profiling report to {out.metrics_path}[/green]")
+    console.print(f"[cyan]Fetch summary:[/cyan] {out.summary}")
 
 
 @app.command("build-features")
