@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 import csv
@@ -13,6 +12,19 @@ from rich.progress import (
     SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
+)
+from trader.data.registry import (
+    build_dataset_id,
+    build_source_entries,
+    find_dataset_id_by_artifact,
+    summarize_csv_artifact,
+    timestamp_ms_to_iso,
+    write_dataset_manifest,
+)
+from trader.data.storage import (
+    labels_dataset_dir,
+    resolve_features_dataset_dir,
+    write_tag,
 )
 
 console = Console()
@@ -32,38 +44,8 @@ class FeatureRow:
     close: float
 
 
-def _utc_stamp(ms: int) -> str:
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y%m%d_%H%M%S")
-
-
-def _build_output_path(
-    symbol: str,
-    dataset_name: str,
-    start_ms: int,
-    end_ms: int,
-) -> Path:
-    out_dir = Path("data/labels") / symbol
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{dataset_name}_{_utc_stamp(start_ms)}__{_utc_stamp(end_ms)}.csv"
-    return out_dir / filename
-
-
 def _find_latest_feature_file(symbol: str) -> Path:
-    feature_dir = Path("data/features") / symbol
-    if not feature_dir.exists():
-        raise FileNotFoundError(f"No feature directory found for {symbol}: {feature_dir}")
-
-    candidates = sorted(
-        feature_dir.glob("*.csv"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not candidates:
-        raise FileNotFoundError(f"No feature CSV files found for {symbol} in {feature_dir}")
-
-    return candidates[0]
+    return resolve_features_dataset_dir(symbol=symbol, latest=True) / "features.csv"
 
 
 def _parse_feature_row(raw: dict[str, str]) -> FeatureRow:
@@ -119,7 +101,7 @@ def _iter_feature_rows(path: Path) -> tuple[list[str], Iterator[FeatureRow]]:
 
 def _open_output_writer(
     symbol: str,
-    dataset_name: str,
+    dataset_id: str,
     fieldnames_in: list[str],
 ) -> tuple[Path, Path, Any, csv.DictWriter]:
     ordered_front = [
@@ -151,11 +133,10 @@ def _open_output_writer(
     remaining = [col for col in fieldnames_in if col not in ordered_front]
     fieldnames_out = ordered_front + remaining
 
-    # Temporary placeholder. Real name is decided once we know start/end.
-    out_dir = Path("data/labels") / symbol
+    out_dir = labels_dataset_dir(symbol=symbol, dataset_id=dataset_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    part_path = out_dir / f"{dataset_name}.csv.part"
+    part_path = out_dir / "labels.csv.part"
     handle = part_path.open("w", newline="", encoding="utf-8")
     writer = csv.DictWriter(handle, fieldnames=fieldnames_out)
     writer.writeheader()
@@ -167,20 +148,11 @@ def _finalize_output(
     out_dir: Path,
     part_path: Path,
     handle: Any,
-    symbol: str,
-    dataset_name: str,
-    start_ms: int,
-    end_ms: int,
 ) -> Path:
     handle.flush()
     handle.close()
 
-    final_path = _build_output_path(
-        symbol=symbol,
-        dataset_name=dataset_name,
-        start_ms=start_ms,
-        end_ms=end_ms,
-    )
+    final_path = out_dir / "labels.csv"
     if final_path.exists():
         final_path.unlink()
     part_path.replace(final_path)
@@ -412,15 +384,37 @@ def build_labels(
     console.print(f"[cyan]Streaming features from[/cyan] {feature_path}")
 
     fieldnames_in, row_iter = _iter_feature_rows(feature_path)
-    out_dir, part_path, handle, writer = _open_output_writer(
-        symbol=symbol,
-        dataset_name=dataset_name,
-        fieldnames_in=fieldnames_in,
+
+    feature_dataset_id = find_dataset_id_by_artifact(
+        dataset_type="features",
+        artifact_path=feature_path,
     )
 
     tp = take_profit_pct / 100.0
     sl = stop_loss_pct / 100.0
     total_cost = (fee_pct + slippage_pct) / 100.0
+
+    source_info = {
+        "symbol": symbol,
+        "feature_artifact": str(feature_path),
+        "feature_dataset_id": feature_dataset_id,
+        "horizon_steps": horizon_steps,
+    }
+    params_info = {
+        "dataset_name": dataset_name,
+        "horizon_steps": horizon_steps,
+        "take_profit_pct": take_profit_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "fee_pct": fee_pct,
+        "slippage_pct": slippage_pct,
+    }
+    dataset_id = build_dataset_id(source=source_info, params=params_info)
+
+    out_dir, part_path, handle, writer = _open_output_writer(
+        symbol=symbol,
+        dataset_id=dataset_id,
+        fieldnames_in=fieldnames_in,
+    )
 
     buffer: deque[FeatureRow] = deque()
     first_ts_ms: int | None = None
@@ -511,11 +505,41 @@ def build_labels(
             out_dir=out_dir,
             part_path=part_path,
             handle=handle,
-            symbol=symbol,
-            dataset_name=dataset_name,
-            start_ms=first_ts_ms,
-            end_ms=last_ts_ms + 1000,
         )
+
+        timeframe = f"{timeframe_s}s"
+        parent_dataset_id = feature_dataset_id
+        csv_summary = summarize_csv_artifact(out_path, class_column="label_name")
+
+        manifest = {
+            "artifact_path": str(out_path),
+            "symbol": symbol,
+            "symbols": [symbol],
+            "timeframe": timeframe,
+            "timeframe_s": timeframe_s,
+            "date_range": {
+                "start_ms": first_ts_ms,
+                "end_ms": last_ts_ms + 1000,
+                "start_at": timestamp_ms_to_iso(first_ts_ms),
+                "end_at": timestamp_ms_to_iso(last_ts_ms + 1000),
+            },
+            "source_raw_files": build_source_entries([feature_path]),
+            "labeling_params": {
+                "horizon_steps": horizon_steps,
+                "take_profit_pct": take_profit_pct,
+                "stop_loss_pct": stop_loss_pct,
+                "fee_pct": fee_pct,
+                "slippage_pct": slippage_pct,
+            },
+            "parent_dataset_id": parent_dataset_id,
+            **csv_summary,
+        }
+        write_dataset_manifest(
+            dataset_type="labels",
+            dataset_id=dataset_id,
+            manifest=manifest,
+        )
+        write_tag(base_dir=Path("data/labels") / symbol, tag="latest", target_id=dataset_id)
 
         console.print(
             f"[green]Labels built:[/green] "
