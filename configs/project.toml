@@ -1,0 +1,3 @@
+exchange = "binance"
+timeframe = "1s"
+symbols = ["BTCUSDT"]

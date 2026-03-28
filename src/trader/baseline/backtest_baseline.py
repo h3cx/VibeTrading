@@ -1,0 +1,504 @@
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, cast
+import json
+import math
+
+import numpy as np
+import pandas as pd
+import torch
+from rich.console import Console
+from sklearn.metrics import confusion_matrix
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+
+from trader.baseline.train_baseline import BaselineMLP, LABEL_NAMES
+
+console = Console()
+
+
+@dataclass
+class SplitData:
+    df: pd.DataFrame
+    x: np.ndarray
+    y: np.ndarray
+    timestamps_ms: np.ndarray
+
+
+def _utc_stamp(ms: int) -> str:
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y%m%d_%H%M%S")
+
+
+def _find_latest_checkpoint(symbol: str) -> Path:
+    model_dir = Path("models") / "baseline" / symbol
+    if not model_dir.exists():
+        raise FileNotFoundError(f"No model directory found for {symbol}: {model_dir}")
+
+    candidates = sorted(
+        model_dir.glob("**/model.pt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoint files found in {model_dir}")
+
+    return candidates[0]
+
+
+def _find_latest_label_file(symbol: str) -> Path:
+    label_dir = Path("data/labels") / symbol
+    if not label_dir.exists():
+        raise FileNotFoundError(f"No label directory found for {symbol}: {label_dir}")
+
+    candidates = sorted(
+        label_dir.glob("*.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not candidates:
+        raise FileNotFoundError(f"No label CSV files found for {symbol} in {label_dir}")
+
+    return candidates[0]
+
+
+def _load_checkpoint(path: Path) -> dict[str, Any]:
+    checkpoint = torch.load(path, map_location="cpu")
+    required = {
+        "model_state_dict",
+        "input_dim",
+        "feature_columns",
+        "standardizer_mean",
+        "standardizer_std",
+        "symbol",
+    }
+    missing = required - set(checkpoint.keys())
+    if missing:
+        raise ValueError(f"Checkpoint is missing keys: {sorted(missing)}")
+    return checkpoint
+
+
+def _load_labels(path: Path) -> pd.DataFrame:
+    console.print(f"[cyan]Loading labels from[/cyan] {path}")
+    df = cast(pd.DataFrame, pd.read_csv(path))
+
+    required = {
+        "timestamp",
+        "timestamp_ms",
+        "timestamp_s",
+        "label",
+        "label_name",
+        "close",
+        "long_net_return_pct",
+        "short_net_return_pct",
+        "time_to_exit_s",
+        "long_event",
+        "short_event",
+        "exit_reason",
+    }
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Label dataset is missing columns: {sorted(missing)}")
+
+    df = df.copy()
+
+    numeric_cols = [
+        "timestamp_ms",
+        "timestamp_s",
+        "label",
+        "close",
+        "long_net_return_pct",
+        "short_net_return_pct",
+        "time_to_exit_s",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = cast(pd.DataFrame, df.dropna(subset=["timestamp_ms", "label", "close"]))
+    df = cast(pd.DataFrame, df.sort_values(by="timestamp_ms"))
+    df = cast(pd.DataFrame, df.drop_duplicates(subset=["timestamp_ms"], keep="last"))
+    df = cast(pd.DataFrame, df.reset_index(drop=True))
+
+    if df.empty:
+        raise RuntimeError("Label dataset is empty after cleaning")
+
+    return df
+
+
+def _split_by_time(
+    df: pd.DataFrame,
+    x: np.ndarray,
+    y: np.ndarray,
+    timestamps_ms: np.ndarray,
+    train_frac: float,
+    val_frac: float,
+) -> tuple[SplitData, SplitData, SplitData]:
+    n = len(x)
+    if n < 100:
+        raise RuntimeError("Dataset is too small to split safely")
+
+    train_end = int(n * train_frac)
+    val_end = int(n * (train_frac + val_frac))
+
+    train_end = max(train_end, 1)
+    val_end = max(val_end, train_end + 1)
+    val_end = min(val_end, n - 1)
+
+    train = SplitData(
+        df=cast(pd.DataFrame, df.iloc[:train_end].reset_index(drop=True)),
+        x=x[:train_end],
+        y=y[:train_end],
+        timestamps_ms=timestamps_ms[:train_end],
+    )
+    val = SplitData(
+        df=cast(pd.DataFrame, df.iloc[train_end:val_end].reset_index(drop=True)),
+        x=x[train_end:val_end],
+        y=y[train_end:val_end],
+        timestamps_ms=timestamps_ms[train_end:val_end],
+    )
+    test = SplitData(
+        df=cast(pd.DataFrame, df.iloc[val_end:].reset_index(drop=True)),
+        x=x[val_end:],
+        y=y[val_end:],
+        timestamps_ms=timestamps_ms[val_end:],
+    )
+
+    if len(train.x) == 0 or len(val.x) == 0 or len(test.x) == 0:
+        raise RuntimeError("One of the time splits is empty")
+
+    return train, val, test
+
+
+def _apply_standardizer(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return ((x - mean) / std).astype(np.float32)
+
+
+def _predict_probabilities(
+    model: nn.Module,
+    x: np.ndarray,
+    device: torch.device,
+    batch_size: int,
+) -> np.ndarray:
+    x_tensor = torch.tensor(x, dtype=torch.float32)
+    loader = DataLoader(
+        TensorDataset(x_tensor),
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    model.eval()
+    probs: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for (xb,) in loader:
+            xb = xb.to(device, non_blocking=True)
+            logits = model(xb)
+            prob = torch.softmax(logits, dim=1)
+            probs.append(prob.cpu().numpy())
+
+    return np.concatenate(probs, axis=0)
+
+
+def _threshold_decisions(
+    probs: np.ndarray,
+    long_threshold: float,
+    short_threshold: float,
+    margin: float,
+) -> np.ndarray:
+    decisions = np.zeros(len(probs), dtype=np.int64)
+
+    p_no = probs[:, 0]
+    p_long = probs[:, 1]
+    p_short = probs[:, 2]
+
+    for i in range(len(probs)):
+        long_ok = (
+            p_long[i] >= long_threshold
+            and p_long[i] > p_short[i]
+            and p_long[i] >= p_no[i] + margin
+        )
+        short_ok = (
+            p_short[i] >= short_threshold
+            and p_short[i] > p_long[i]
+            and p_short[i] >= p_no[i] + margin
+        )
+
+        if long_ok and short_ok:
+            decisions[i] = 1 if p_long[i] >= p_short[i] else 2
+        elif long_ok:
+            decisions[i] = 1
+        elif short_ok:
+            decisions[i] = 2
+        else:
+            decisions[i] = 0
+
+    return decisions
+
+
+def _max_drawdown_pct(equity_curve: list[float]) -> float:
+    if not equity_curve:
+        return 0.0
+
+    peak = equity_curve[0]
+    max_dd = 0.0
+
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        dd = (value / peak) - 1.0
+        if dd < max_dd:
+            max_dd = dd
+
+    return abs(max_dd) * 100.0
+
+
+def backtest_baseline(
+    symbol: str,
+    checkpoint_path: str | None = None,
+    label_csv_path: str | None = None,
+    eval_split: str = "test",
+    train_frac: float = 0.70,
+    val_frac: float = 0.15,
+    batch_size: int = 2048,
+    long_threshold: float = 0.80,
+    short_threshold: float = 0.80,
+    margin: float = 0.05,
+) -> Path:
+    if eval_split not in {"train", "val", "test", "all"}:
+        raise ValueError("eval_split must be one of: train, val, test, all")
+
+    checkpoint_file = Path(checkpoint_path) if checkpoint_path else _find_latest_checkpoint(symbol)
+    checkpoint = _load_checkpoint(checkpoint_file)
+
+    label_file = Path(label_csv_path) if label_csv_path else _find_latest_label_file(symbol)
+    df = _load_labels(label_file)
+
+    feature_cols = list(checkpoint["feature_columns"])
+    missing_features = [col for col in feature_cols if col not in df.columns]
+    if missing_features:
+        raise ValueError(f"Label dataset is missing feature columns required by checkpoint: {missing_features}")
+
+    x_all = cast(pd.DataFrame, df[feature_cols]).to_numpy(dtype=np.float32)
+    y_all = cast(pd.Series, df["label"]).to_numpy(dtype=np.int64)
+    timestamps_ms = cast(pd.Series, df["timestamp_ms"]).to_numpy(dtype=np.int64)
+
+    finite_mask = np.isfinite(x_all).all(axis=1)
+    df = cast(pd.DataFrame, df.loc[finite_mask].reset_index(drop=True))
+    x_all = x_all[finite_mask]
+    y_all = y_all[finite_mask]
+    timestamps_ms = timestamps_ms[finite_mask]
+
+    train_split_data, val_split_data, test_split_data = _split_by_time(
+        df=df,
+        x=x_all,
+        y=y_all,
+        timestamps_ms=timestamps_ms,
+        train_frac=train_frac,
+        val_frac=val_frac,
+    )
+
+    if eval_split == "train":
+        split = train_split_data
+    elif eval_split == "val":
+        split = val_split_data
+    elif eval_split == "test":
+        split = test_split_data
+    else:
+        split = SplitData(
+            df=df,
+            x=x_all,
+            y=y_all,
+            timestamps_ms=timestamps_ms,
+        )
+
+    mean = np.asarray(checkpoint["standardizer_mean"], dtype=np.float32)
+    std = np.asarray(checkpoint["standardizer_std"], dtype=np.float32)
+    x_eval = _apply_standardizer(split.x, mean, std)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    console.print(f"[cyan]Backtest device:[/cyan] {device}")
+
+    model = BaselineMLP(input_dim=int(checkpoint["input_dim"]))
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(device)
+
+    with console.status("Running model inference..."):
+        probs = _predict_probabilities(
+            model=model,
+            x=x_eval,
+            device=device,
+            batch_size=batch_size,
+        )
+
+    threshold_preds = _threshold_decisions(
+        probs=probs,
+        long_threshold=long_threshold,
+        short_threshold=short_threshold,
+        margin=margin,
+    )
+
+    cm = confusion_matrix(split.y, threshold_preds, labels=[0, 1, 2])
+
+    eval_df = split.df.copy()
+    eval_df["p_no_trade"] = probs[:, 0]
+    eval_df["p_long"] = probs[:, 1]
+    eval_df["p_short"] = probs[:, 2]
+    eval_df["threshold_pred"] = threshold_preds
+    eval_df["threshold_pred_name"] = [LABEL_NAMES[int(x)] for x in threshold_preds]
+
+    trades: list[dict[str, Any]] = []
+    equity = 1.0
+    equity_curve: list[float] = [equity]
+    next_allowed_timestamp_ms = -1
+
+    with console.status("Simulating one-trade-at-a-time backtest..."):
+        for row in eval_df.itertuples(index=False):
+            ts_ms = int(row.timestamp_ms)
+
+            if ts_ms < next_allowed_timestamp_ms:
+                equity_curve.append(equity)
+                continue
+
+            decision = int(row.threshold_pred)
+            if decision == 0:
+                equity_curve.append(equity)
+                continue
+
+            if decision == 1:
+                realized_return_pct = row.long_net_return_pct
+                side = "LONG"
+                event = row.long_event
+            else:
+                realized_return_pct = row.short_net_return_pct
+                side = "SHORT"
+                event = row.short_event
+
+            tte = row.time_to_exit_s
+
+            if pd.isna(realized_return_pct) or pd.isna(tte):
+                equity_curve.append(equity)
+                continue
+
+            realized_return_pct = float(realized_return_pct)
+            hold_s = max(int(math.ceil(float(tte))), 1)
+
+            equity *= (1.0 + realized_return_pct / 100.0)
+            equity_curve.append(equity)
+
+            next_allowed_timestamp_ms = ts_ms + hold_s * 1000
+
+            trades.append(
+                {
+                    "timestamp": row.timestamp,
+                    "timestamp_ms": ts_ms,
+                    "side": side,
+                    "close": float(row.close),
+                    "p_no_trade": float(row.p_no_trade),
+                    "p_long": float(row.p_long),
+                    "p_short": float(row.p_short),
+                    "event": str(event),
+                    "exit_reason": str(row.exit_reason),
+                    "hold_s": hold_s,
+                    "return_pct": realized_return_pct,
+                    "equity_after": equity,
+                }
+            )
+
+    trade_df = cast(pd.DataFrame, pd.DataFrame(trades))
+
+    trade_count = int(len(trade_df))
+    long_count = int((trade_df["side"] == "LONG").sum()) if trade_count else 0
+    short_count = int((trade_df["side"] == "SHORT").sum()) if trade_count else 0
+
+    if trade_count:
+        wins = cast(pd.Series, trade_df["return_pct"]) > 0.0
+        win_rate = float(wins.mean()) * 100.0
+        avg_return_pct = float(cast(pd.Series, trade_df["return_pct"]).mean())
+        cumulative_return_pct = (equity - 1.0) * 100.0
+        gross_profit = float(cast(pd.Series, trade_df.loc[trade_df["return_pct"] > 0.0, "return_pct"]).sum())
+        gross_loss = float(abs(cast(pd.Series, trade_df.loc[trade_df["return_pct"] < 0.0, "return_pct"]).sum()))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        avg_hold_s = float(cast(pd.Series, trade_df["hold_s"]).mean())
+    else:
+        win_rate = 0.0
+        avg_return_pct = 0.0
+        cumulative_return_pct = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        profit_factor = 0.0
+        avg_hold_s = 0.0
+
+    max_drawdown_pct = _max_drawdown_pct(equity_curve)
+
+    out_dir = Path("backtests") / "baseline" / symbol / checkpoint_file.parent.name / eval_split
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = out_dir / "report.json"
+    trades_path = out_dir / "trades.csv"
+    predictions_path = out_dir / "predictions.csv"
+
+    trade_df.to_csv(trades_path, index=False)
+    eval_df.to_csv(predictions_path, index=False)
+
+    report = {
+        "symbol": symbol,
+        "checkpoint_path": str(checkpoint_file),
+        "label_csv_path": str(label_file),
+        "eval_split": eval_split,
+        "device": str(device),
+        "rows_evaluated": int(len(eval_df)),
+        "long_threshold": long_threshold,
+        "short_threshold": short_threshold,
+        "margin": margin,
+        "trade_count": trade_count,
+        "long_count": long_count,
+        "short_count": short_count,
+        "win_rate_pct": win_rate,
+        "avg_return_pct": avg_return_pct,
+        "cumulative_return_pct": cumulative_return_pct,
+        "max_drawdown_pct": max_drawdown_pct,
+        "profit_factor": profit_factor,
+        "gross_profit_pct": gross_profit,
+        "gross_loss_pct": gross_loss,
+        "avg_hold_s": avg_hold_s,
+        "threshold_confusion_matrix": cm.tolist(),
+        "true_label_counts": {
+            "NO_TRADE": int((split.y == 0).sum()),
+            "LONG_SETUP": int((split.y == 1).sum()),
+            "SHORT_SETUP": int((split.y == 2).sum()),
+        },
+        "threshold_pred_counts": {
+            "NO_TRADE": int((threshold_preds == 0).sum()),
+            "LONG_SETUP": int((threshold_preds == 1).sum()),
+            "SHORT_SETUP": int((threshold_preds == 2).sum()),
+        },
+    }
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+
+    console.print(f"[green]Saved backtest report:[/green] {report_path}")
+    console.print(f"[green]Saved trades:[/green] {trades_path}")
+    console.print(f"[green]Saved predictions:[/green] {predictions_path}")
+
+    console.print("[bold]Thresholded confusion matrix[/bold]")
+    console.print(str(cm))
+
+    console.print(
+        "[green]Backtest stats:[/green] "
+        f"trades={trade_count} "
+        f"win_rate={win_rate:.2f}% "
+        f"avg_return={avg_return_pct:.4f}% "
+        f"cum_return={cumulative_return_pct:.2f}% "
+        f"max_dd={max_drawdown_pct:.2f}% "
+        f"profit_factor={profit_factor:.4f}"
+    )
+
+    return report_path

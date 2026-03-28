@@ -1,0 +1,29 @@
+[project]
+name = "vibetrading"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Hector van der Aa", email = "hector@h3cx.dev" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pyarrow>=23.0.1",
+    "pydantic>=2.12.5",
+    "python-lsp-server>=1.14.0",
+    "rich>=14.3.3",
+    "ruff>=0.15.8",
+    "scikit-learn>=1.8.0",
+    "torch>=2.11.0",
+    "typer>=0.24.1",
+]
+
+[project.scripts]
+trader = "trader.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
