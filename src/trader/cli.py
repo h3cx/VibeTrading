@@ -71,7 +71,7 @@ def init() -> None:
 
     exchange = Prompt.ask("Exchange", default="binance")
     symbols_raw = Prompt.ask("Symbols (comma separated)", default="BTCUSDT,SOLUSDT")
-    timeframe = Prompt.ask("Decision timeframe", default="1s")
+    timeframe = Prompt.ask("Decision timeframe", default="5m")
 
     symbols = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()]
 
@@ -150,7 +150,7 @@ def build_features_cmd() -> None:
     start = Prompt.ask("Start date (YYYY-MM-DD)")
     end = Prompt.ask("End date (YYYY-MM-DD)")
     dataset_name = Prompt.ask("Dataset name", default="default")
-    timeframe = Prompt.ask("Feature timeframe", default="1s")
+    timeframe = Prompt.ask("Feature timeframe", default="5m")
     include_kline_context = Prompt.ask(
         "Include 1m kline context?",
         choices=["y", "n"],
@@ -174,16 +174,16 @@ def build_labels_cmd() -> None:
 
     symbol = Prompt.ask("Symbol", default=cfg.symbols[0]).upper()
     input_path = Prompt.ask("Feature CSV path (blank = latest for symbol)", default="")
-    horizon_s = int(Prompt.ask("Horizon in seconds", default="60"))
-    take_profit_pct = float(Prompt.ask("Take-profit percent", default="0.10"))
-    stop_loss_pct = float(Prompt.ask("Stop-loss percent", default="0.08"))
+    horizon_steps = int(Prompt.ask("Horizon in bars", default="12"))
+    take_profit_pct = float(Prompt.ask("Take-profit percent", default="0.35"))
+    stop_loss_pct = float(Prompt.ask("Stop-loss percent", default="0.25"))
     fee_pct = float(Prompt.ask("Round-trip fee percent", default="0.08"))
     slippage_pct = float(Prompt.ask("Round-trip slippage percent", default="0.02"))
     dataset_name = Prompt.ask("Label dataset name", default="default_labels")
 
     out = build_labels(
         symbol=symbol,
-        horizon_s=horizon_s,
+        horizon_steps=horizon_steps,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
         fee_pct=fee_pct,
@@ -204,6 +204,10 @@ def train_baseline_cmd() -> None:
     epochs = int(Prompt.ask("Epochs", default="20"))
     batch_size = int(Prompt.ask("Batch size", default="512"))
     learning_rate = float(Prompt.ask("Learning rate", default="0.001"))
+    lookback_window = int(Prompt.ask("Lookback window (bars)", default="12"))
+    hidden_dim = int(Prompt.ask("Hidden size", default="512"))
+    depth = int(Prompt.ask("MLP block depth", default="4"))
+    dropout = float(Prompt.ask("Dropout", default="0.15"))
     train_frac = float(Prompt.ask("Train fraction", default="0.70"))
     val_frac = float(Prompt.ask("Validation fraction", default="0.15"))
     use_class_weights = Prompt.ask(
@@ -219,6 +223,10 @@ def train_baseline_cmd() -> None:
         epochs=epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
+        lookback_window=lookback_window,
+        hidden_dim=hidden_dim,
+        depth=depth,
+        dropout=dropout,
         train_frac=train_frac,
         val_frac=val_frac,
         use_class_weights=(use_class_weights == "y"),

@@ -176,7 +176,33 @@ def _split_by_time(
 
 
 def _apply_standardizer(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return ((x - mean) / std).astype(np.float32)
+    x_2d = x.reshape(x.shape[0], -1)
+    x_scaled = ((x_2d - mean) / std).astype(np.float32)
+    return x_scaled.reshape(x.shape)
+
+
+def _build_lookback_sequences_for_backtest(
+    df: pd.DataFrame,
+    x: np.ndarray,
+    y: np.ndarray,
+    timestamps_ms: np.ndarray,
+    lookback_window: int,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+    if lookback_window <= 0:
+        raise ValueError("lookback_window must be greater than 0")
+    if len(x) < lookback_window:
+        raise RuntimeError("Dataset has fewer rows than lookback_window")
+
+    sample_count = x.shape[0] - lookback_window + 1
+    feature_count = x.shape[1]
+    x_seq = np.empty((sample_count, lookback_window, feature_count), dtype=np.float32)
+    for i in range(sample_count):
+        x_seq[i] = x[i : i + lookback_window]
+
+    y_seq = y[lookback_window - 1 :]
+    ts_seq = timestamps_ms[lookback_window - 1 :]
+    df_seq = cast(pd.DataFrame, df.iloc[lookback_window - 1 :].reset_index(drop=True))
+    return df_seq, x_seq, y_seq, ts_seq
 
 
 def _predict_probabilities(
@@ -295,6 +321,15 @@ def backtest_baseline(
     y_all = y_all[finite_mask]
     timestamps_ms = timestamps_ms[finite_mask]
 
+    lookback_window = int(checkpoint.get("lookback_window", 1))
+    df, x_all, y_all, timestamps_ms = _build_lookback_sequences_for_backtest(
+        df=df,
+        x=x_all,
+        y=y_all,
+        timestamps_ms=timestamps_ms,
+        lookback_window=lookback_window,
+    )
+
     train_split_data, val_split_data, test_split_data = _split_by_time(
         df=df,
         x=x_all,
@@ -325,7 +360,13 @@ def backtest_baseline(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     console.print(f"[cyan]Backtest device:[/cyan] {device}")
 
-    model = BaselineMLP(input_dim=int(checkpoint["input_dim"]))
+    model = BaselineMLP(
+        input_dim=int(checkpoint["input_dim"]),
+        hidden_dim=int(checkpoint.get("hidden_dim", 512)),
+        depth=int(checkpoint.get("depth", 4)),
+        dropout=float(checkpoint.get("dropout", 0.15)),
+        output_dim=3,
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     model = model.to(device)
 

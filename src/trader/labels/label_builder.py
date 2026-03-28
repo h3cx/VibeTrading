@@ -91,6 +91,7 @@ def _iter_feature_rows(path: Path) -> tuple[list[str], Iterator[FeatureRow]]:
         "timestamp",
         "timestamp_ms",
         "timestamp_s",
+        "timeframe_s",
         "open",
         "high",
         "low",
@@ -138,6 +139,8 @@ def _open_output_writer(
         "short_horizon_return_pct",
         "future_max_upside_pct",
         "future_max_downside_pct",
+        "horizon_steps",
+        "horizon_seconds",
         "horizon_s",
         "take_profit_pct",
         "stop_loss_pct",
@@ -197,7 +200,8 @@ def _compute_label_for_current(
     tp: float,
     sl: float,
     total_cost: float,
-    horizon_s: int,
+    horizon_steps: int,
+    horizon_seconds: int,
     take_profit_pct: float,
     stop_loss_pct: float,
     fee_pct: float,
@@ -219,7 +223,9 @@ def _compute_label_for_current(
             "exit_reason": "NONE",
             "label": LABEL_NO_TRADE,
             "label_name": "NO_TRADE",
-            "horizon_s": horizon_s,
+            "horizon_steps": horizon_steps,
+            "horizon_seconds": horizon_seconds,
+            "horizon_s": horizon_seconds,
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
             "fee_pct": fee_pct,
@@ -375,7 +381,9 @@ def _compute_label_for_current(
         "exit_reason": exit_reason,
         "label": label,
         "label_name": label_name,
-        "horizon_s": horizon_s,
+        "horizon_steps": horizon_steps,
+        "horizon_seconds": horizon_seconds,
+        "horizon_s": horizon_seconds,
         "take_profit_pct": take_profit_pct,
         "stop_loss_pct": stop_loss_pct,
         "fee_pct": fee_pct,
@@ -385,7 +393,7 @@ def _compute_label_for_current(
 
 def build_labels(
     symbol: str,
-    horizon_s: int,
+    horizon_steps: int,
     take_profit_pct: float,
     stop_loss_pct: float,
     fee_pct: float,
@@ -393,8 +401,8 @@ def build_labels(
     dataset_name: str = "default_labels",
     input_path: str | None = None,
 ) -> Path:
-    if horizon_s <= 0:
-        raise ValueError("horizon_s must be greater than 0")
+    if horizon_steps <= 0:
+        raise ValueError("horizon_steps must be greater than 0")
     if take_profit_pct <= 0:
         raise ValueError("take_profit_pct must be greater than 0")
     if stop_loss_pct <= 0:
@@ -424,7 +432,18 @@ def build_labels(
     rows_written = 0
 
     try:
-        for _ in range(horizon_s + 1):
+        first_row = next(row_iter, None)
+        if first_row is None:
+            raise RuntimeError("Feature dataset is empty after cleaning")
+
+        timeframe_s = int(float(first_row.raw["timeframe_s"]))
+        if timeframe_s <= 0:
+            raise ValueError("Feature dataset contains invalid timeframe_s")
+
+        horizon_seconds = int(horizon_steps * timeframe_s)
+        buffer.append(first_row)
+
+        for _ in range(horizon_steps):
             try:
                 buffer.append(next(row_iter))
             except StopIteration:
@@ -452,7 +471,8 @@ def build_labels(
                     tp=tp,
                     sl=sl,
                     total_cost=total_cost,
-                    horizon_s=horizon_s,
+                    horizon_steps=horizon_steps,
+                    horizon_seconds=horizon_seconds,
                     take_profit_pct=take_profit_pct,
                     stop_loss_pct=stop_loss_pct,
                     fee_pct=fee_pct,

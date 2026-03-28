@@ -28,6 +28,24 @@ KLINE_CHUNK_ROWS = 200_000
 EPS = 1e-12
 
 
+def _parse_timeframe_to_seconds(value: str) -> int:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        raise ValueError("timeframe cannot be empty")
+
+    match = re.fullmatch(r"(\d+)([smh])", cleaned)
+    if match is None:
+        raise ValueError("timeframe must match '<int>s', '<int>m', or '<int>h' (example: 5m)")
+
+    qty = int(match.group(1))
+    unit = match.group(2)
+    if qty <= 0:
+        raise ValueError("timeframe quantity must be greater than 0")
+
+    factor = {"s": 1, "m": 60, "h": 3600}[unit]
+    return qty * factor
+
+
 def _utc_stamp(ms: int) -> str:
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     return dt.strftime("%Y%m%d_%H%M%S")
@@ -108,6 +126,7 @@ def _open_output_csv(
         "timestamp",
         "timestamp_ms",
         "timestamp_s",
+        "timeframe_s",
         "open",
         "high",
         "low",
@@ -415,8 +434,7 @@ def build_feature_frames(
     timeframe: str = "1s",
     include_kline_context: bool = True,
 ) -> Path:
-    if timeframe != "1s":
-        raise ValueError("V1 only supports timeframe='1s'")
+    timeframe_s = _parse_timeframe_to_seconds(timeframe)
 
     if end_ms <= start_ms:
         raise ValueError("end_ms must be greater than start_ms")
@@ -424,6 +442,7 @@ def build_feature_frames(
     start_second = start_ms // 1000
     end_second = (end_ms - 1) // 1000
     total_seconds = end_second - start_second + 1
+    total_bars = math.ceil(total_seconds / timeframe_s)
 
     kline_context: dict[int, tuple[float, float, float, float]] = {}
     first_kline: tuple[float, float, float, float] | None = None
@@ -479,42 +498,54 @@ def build_feature_frames(
         ) as progress:
             task_id = progress.add_task(
                 f"Building feature frames for {symbol}",
-                total=total_seconds,
+                total=total_bars,
                 rows=0,
             )
 
-            for second_s in range(start_second, end_second + 1):
-                if current_agg is not None and int(current_agg["second_s"]) == second_s:
-                    second_row = dict(current_agg)
-                    last_close = float(second_row["close"])
-                    current_agg = next(agg_iter, None)
-                else:
-                    second_row = {
-                        "second_s": second_s,
-                        "open": last_close,
-                        "high": last_close,
-                        "low": last_close,
-                        "close": last_close,
-                        "trade_count_1s": 0,
-                        "volume_1s": 0.0,
-                        "buy_volume_1s": 0.0,
-                        "sell_volume_1s": 0.0,
-                        "notional_volume_1s": 0.0,
-                        "buy_notional_1s": 0.0,
-                        "sell_notional_1s": 0.0,
-                        "max_trade_size_1s": 0.0,
-                    }
+            bars_written = 0
+            for bar_start_second in range(start_second, end_second + 1, timeframe_s):
+                bar_end_second = min(bar_start_second + timeframe_s - 1, end_second)
 
-                close_px = float(second_row["close"])
-                open_px = float(second_row["open"])
-                high_px = float(second_row["high"])
-                low_px = float(second_row["low"])
-                trade_count_1s = int(second_row["trade_count_1s"])
-                volume_1s = float(second_row["volume_1s"])
-                buy_volume_1s = float(second_row["buy_volume_1s"])
-                sell_volume_1s = float(second_row["sell_volume_1s"])
-                notional_volume_1s = float(second_row["notional_volume_1s"])
-                max_trade_size_1s = float(second_row["max_trade_size_1s"])
+                bucket_rows: list[dict[str, float | int]] = []
+                for second_s in range(bar_start_second, bar_end_second + 1):
+                    if current_agg is not None and int(current_agg["second_s"]) == second_s:
+                        second_row = dict(current_agg)
+                        last_close = float(second_row["close"])
+                        current_agg = next(agg_iter, None)
+                    else:
+                        second_row = {
+                            "second_s": second_s,
+                            "open": last_close,
+                            "high": last_close,
+                            "low": last_close,
+                            "close": last_close,
+                            "trade_count_1s": 0,
+                            "volume_1s": 0.0,
+                            "buy_volume_1s": 0.0,
+                            "sell_volume_1s": 0.0,
+                            "notional_volume_1s": 0.0,
+                            "buy_notional_1s": 0.0,
+                            "sell_notional_1s": 0.0,
+                            "max_trade_size_1s": 0.0,
+                        }
+                    bucket_rows.append(second_row)
+
+                if not bucket_rows:
+                    continue
+
+                first_row = bucket_rows[0]
+                last_row = bucket_rows[-1]
+
+                close_px = float(last_row["close"])
+                open_px = float(first_row["open"])
+                high_px = max(float(r["high"]) for r in bucket_rows)
+                low_px = min(float(r["low"]) for r in bucket_rows)
+                trade_count_1s = int(sum(int(r["trade_count_1s"]) for r in bucket_rows))
+                volume_1s = float(sum(float(r["volume_1s"]) for r in bucket_rows))
+                buy_volume_1s = float(sum(float(r["buy_volume_1s"]) for r in bucket_rows))
+                sell_volume_1s = float(sum(float(r["sell_volume_1s"]) for r in bucket_rows))
+                notional_volume_1s = float(sum(float(r["notional_volume_1s"]) for r in bucket_rows))
+                max_trade_size_1s = float(max(float(r["max_trade_size_1s"]) for r in bucket_rows))
 
                 avg_trade_size_1s = (volume_1s / trade_count_1s) if trade_count_1s > 0 else 0.0
                 signed_volume_1s = buy_volume_1s - sell_volume_1s
@@ -550,13 +581,14 @@ def build_feature_frames(
                 volume_zscore_30s = _population_zscore(notional_volume_30_window)
                 price_range_1s = (high_px - low_px) / max(close_px, EPS)
 
-                timestamp_ms = second_s * 1000
-                timestamp = datetime.fromtimestamp(second_s, tz=timezone.utc).isoformat(sep=" ")
+                timestamp_ms = bar_start_second * 1000
+                timestamp = datetime.fromtimestamp(bar_start_second, tz=timezone.utc).isoformat(sep=" ")
 
                 row = [
                     timestamp,
                     timestamp_ms,
-                    second_s,
+                    bar_start_second,
+                    timeframe_s,
                     open_px,
                     high_px,
                     low_px,
@@ -587,7 +619,7 @@ def build_feature_frames(
                 ]
 
                 if include_kline_context:
-                    minute_bucket_ms = (second_s // 60) * 60 * 1000
+                    minute_bucket_ms = (bar_start_second // 60) * 60 * 1000
                     kline = kline_context.get(minute_bucket_ms, last_kline)
 
                     if kline is None:
@@ -613,7 +645,8 @@ def build_feature_frames(
                 writer.writerow(row)
 
                 progress.advance(task_id, 1)
-                progress.update(task_id, rows=second_s - start_second + 1)
+                bars_written += 1
+                progress.update(task_id, rows=bars_written)
 
         return _finalize_output_csv(
             final_path=final_path,

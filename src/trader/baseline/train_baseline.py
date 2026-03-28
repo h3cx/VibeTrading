@@ -40,21 +40,63 @@ class SplitData:
     timestamps_ms: np.ndarray
 
 
-class BaselineMLP(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim_1: int = 128, hidden_dim_2: int = 64, dropout: float = 0.10):
+class MLPBlock(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim_1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim_1, hidden_dim_2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim_2, 3),
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.act1 = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.act2 = nn.GELU()
+        self.use_residual = input_dim == hidden_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.fc1(x)
+        x = self.norm1(x)
+        x = self.act1(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.norm2(x)
+        x = self.act2(x)
+        if self.use_residual:
+            x = x + residual
+        return x
+
+
+class BaselineMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 512,
+        depth: int = 4,
+        dropout: float = 0.15,
+        output_dim: int = 3,
+    ) -> None:
+        if depth < 1:
+            raise ValueError("depth must be at least 1")
+        super().__init__()
+        blocks: list[nn.Module] = []
+        current_dim = input_dim
+        for _ in range(depth):
+            block = MLPBlock(input_dim=current_dim, hidden_dim=hidden_dim, dropout=dropout)
+            blocks.append(block)
+            current_dim = hidden_dim
+
+        self.backbone = nn.Sequential(*blocks)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.GELU(),
+            nn.Linear(128, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        if x.dim() > 2:
+            x = x.reshape(x.shape[0], -1)
+        x = self.backbone(x)
+        return self.head(x)
 
 
 def _utc_stamp(ms: int) -> str:
@@ -135,6 +177,8 @@ def _feature_columns(df: pd.DataFrame) -> list[str]:
         "short_horizon_return_pct",
         "future_max_upside_pct",
         "future_max_downside_pct",
+        "horizon_steps",
+        "horizon_seconds",
         "horizon_s",
         "take_profit_pct",
         "stop_loss_pct",
@@ -184,14 +228,39 @@ def _split_by_time(
 
 
 def _fit_standardizer(x_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    mean = x_train.mean(axis=0)
-    std = x_train.std(axis=0)
+    x_train_2d = x_train.reshape(x_train.shape[0], -1)
+    mean = x_train_2d.mean(axis=0)
+    std = x_train_2d.std(axis=0)
     std = np.where(std < 1e-12, 1.0, std)
     return mean.astype(np.float32), std.astype(np.float32)
 
 
 def _apply_standardizer(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return ((x - mean) / std).astype(np.float32)
+    x_2d = x.reshape(x.shape[0], -1)
+    x_scaled = ((x_2d - mean) / std).astype(np.float32)
+    return x_scaled.reshape(x.shape)
+
+
+def _build_lookback_sequences(
+    x: np.ndarray,
+    y: np.ndarray,
+    timestamps_ms: np.ndarray,
+    lookback_window: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if lookback_window <= 0:
+        raise ValueError("lookback_window must be greater than 0")
+    if x.shape[0] < lookback_window:
+        raise RuntimeError("Dataset has fewer rows than lookback_window")
+
+    sample_count = x.shape[0] - lookback_window + 1
+    feature_count = x.shape[1]
+    x_seq = np.empty((sample_count, lookback_window, feature_count), dtype=np.float32)
+    for i in range(sample_count):
+        x_seq[i] = x[i : i + lookback_window]
+
+    y_seq = y[lookback_window - 1 :]
+    ts_seq = timestamps_ms[lookback_window - 1 :]
+    return x_seq, y_seq, ts_seq
 
 
 def _compute_class_weights(y_train: np.ndarray) -> np.ndarray:
@@ -259,6 +328,10 @@ def train_baseline(
     train_frac: float = 0.70,
     val_frac: float = 0.15,
     use_class_weights: bool = True,
+    lookback_window: int = 12,
+    hidden_dim: int = 512,
+    depth: int = 4,
+    dropout: float = 0.15,
     seed: int = 42,
 ) -> Path:
     if epochs <= 0:
@@ -273,6 +346,14 @@ def train_baseline(
         raise ValueError("val_frac must be between 0 and 1")
     if train_frac + val_frac >= 1.0:
         raise ValueError("train_frac + val_frac must be less than 1")
+    if lookback_window <= 0:
+        raise ValueError("lookback_window must be greater than 0")
+    if hidden_dim <= 0:
+        raise ValueError("hidden_dim must be greater than 0")
+    if depth < 1:
+        raise ValueError("depth must be at least 1")
+    if not (0.0 <= dropout < 1.0):
+        raise ValueError("dropout must be in [0, 1)")
 
     _set_seed(seed)
 
@@ -290,10 +371,17 @@ def train_baseline(
     y_all = y_all[finite_mask]
     timestamps_ms = timestamps_ms[finite_mask]
 
-    train_split, val_split, test_split = _split_by_time(
+    x_seq, y_seq, timestamps_seq = _build_lookback_sequences(
         x=x_all,
         y=y_all,
         timestamps_ms=timestamps_ms,
+        lookback_window=lookback_window,
+    )
+
+    train_split, val_split, test_split = _split_by_time(
+        x=x_seq,
+        y=y_seq,
+        timestamps_ms=timestamps_seq,
         train_frac=train_frac,
         val_frac=val_frac,
     )
@@ -311,7 +399,14 @@ def train_baseline(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     console.print(f"[cyan]Training device:[/cyan] {device}")
 
-    model = BaselineMLP(input_dim=x_train.shape[1]).to(device)
+    input_dim = int(x_train.shape[1] * x_train.shape[2])
+    model = BaselineMLP(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        depth=depth,
+        dropout=dropout,
+        output_dim=3,
+    ).to(device)
 
     if use_class_weights:
         class_weights_np = _compute_class_weights(train_split.y)
@@ -441,7 +536,8 @@ def train_baseline(
 
     checkpoint = {
         "model_state_dict": model.state_dict(),
-        "input_dim": int(x_train.shape[1]),
+        "input_dim": input_dim,
+        "flattened_input_dim": input_dim,
         "feature_columns": feature_cols,
         "standardizer_mean": mean.tolist(),
         "standardizer_std": std.tolist(),
@@ -449,6 +545,10 @@ def train_baseline(
         "label_mapping": LABEL_NAMES,
         "model_name": model_name,
         "symbol": symbol,
+        "lookback_window": lookback_window,
+        "hidden_dim": hidden_dim,
+        "depth": depth,
+        "dropout": dropout,
     }
     torch.save(checkpoint, checkpoint_path)
 
@@ -460,6 +560,10 @@ def train_baseline(
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "use_class_weights": use_class_weights,
+        "lookback_window": lookback_window,
+        "hidden_dim": hidden_dim,
+        "depth": depth,
+        "dropout": dropout,
         "feature_count": len(feature_cols),
         "feature_columns": feature_cols,
         "train_rows": int(len(train_split.x)),
