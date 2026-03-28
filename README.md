@@ -47,6 +47,7 @@ Run these menu options in order for a first reliable baseline:
    - Start/end date: small first range (for example, 1-2 weeks)
 3. **Fetch aggtrades**
    - Same symbol + date range as klines
+   - Fetch reports are written to `artifacts/fetch_reports/<run_id>.json` with stage timing/throughput metrics
 4. **Build features**
    - Dataset name: `default`
    - Feature timeframe: `5m`
@@ -95,6 +96,7 @@ Practical guidance:
 
 - Baseline walkthrough and first-run checklist: [`docs/longer-term-baseline.md`](docs/longer-term-baseline.md)
 - CLI reference and defaults: [`docs/reference/cli-commands.md`](docs/reference/cli-commands.md)
+- Data-fetch performance tuning: [`docs/data-fetching.md`](docs/data-fetching.md)
 - Artifact/output folder layout: [`docs/reference/artifact-layout.md`](docs/reference/artifact-layout.md)
 - QA/codebase limitations report: [`docs/qa/codebase-audit-report.md`](docs/qa/codebase-audit-report.md)
 
