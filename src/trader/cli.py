@@ -128,6 +128,25 @@ def fetch_aggtrades_cmd() -> None:
         choices=["auto", "rest", "archive"],
         default="auto",
     )
+    console.print(
+        "[dim]RAM tradeoff: each extra worker can add roughly 40-120MB peak RAM while a day is being "
+        "downloaded/decompressed.[/dim]"
+    )
+    max_download_workers = int(
+        Prompt.ask(
+            "Max download workers",
+            default="6",
+        )
+    )
+    max_inflight_days = int(
+        Prompt.ask(
+            "Max inflight days (bounded queue for backpressure)",
+            default="12",
+        )
+    )
+    request_timeout_s = float(Prompt.ask("Request timeout seconds", default="30"))
+    max_retries = int(Prompt.ask("Max retries per day", default="3"))
+    retry_backoff_s = float(Prompt.ask("Retry backoff base seconds", default="1"))
 
     if not symbol_exists(symbol):
         console.print(f"[red]Symbol not tradable or not found: {symbol}[/red]")
@@ -138,6 +157,11 @@ def fetch_aggtrades_cmd() -> None:
         start_ms=parse_date_to_ms(start),
         end_ms=parse_date_to_ms(end),
         source=source,
+        max_download_workers=max_download_workers,
+        max_inflight_days=max_inflight_days,
+        request_timeout_s=request_timeout_s,
+        max_retries=max_retries,
+        retry_backoff_s=retry_backoff_s,
     )
     console.print(f"[green]Saved aggtrades to {out}[/green]")
 
