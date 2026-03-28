@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from subprocess import CalledProcessError, check_output
 import json
 import re
 
@@ -123,6 +124,30 @@ def write_dataset_manifest(*, dataset_type: str, dataset_id: str, manifest: dict
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return out_path
+
+
+def current_git_commit_sha() -> str | None:
+    try:
+        output = check_output(["git", "rev-parse", "HEAD"], cwd=_project_root(), text=True)
+    except (CalledProcessError, FileNotFoundError):
+        return None
+
+    value = output.strip()
+    return value or None
+
+
+def write_run_manifest(*, run_id: str, manifest: dict) -> Path:
+    out_dir = _project_root() / "runs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = out_dir / f"{run_id}.json"
+    payload = {
+        **manifest,
+        "run_id": run_id,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
     out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return out_path
 
